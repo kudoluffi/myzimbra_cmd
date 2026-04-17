@@ -46,7 +46,7 @@ log "Updating system & installing core dependencies..."
 apt-get update -y
 apt-get upgrade -y
 apt-get install -y \
-  dnsutils net-tools sysstat unzip pax sqlite3 perl libperl5.34 libdbi-perl \
+  dnsutils net-tools sysstat unzip pax sqlite3 perl libperl5.34 libdbi-perl chrony \
   libnet-dns-perl libexpat1 libssl-dev libxml2-dev libgomp1 libpq5 libpcre2-8-0
 
 # Install optional/legacy packages safely
