@@ -1,9 +1,10 @@
 #!/bin/bash
-# zimbra-letsencrypt.sh v1.3
+# zimbra-letsencrypt.sh v1.3.1
 # Automated Let's Encrypt SSL issuance & deployment for Zimbra 10.x
-# Fixed: Certificate chain validation with Root CA ISRG X1
+# Fixed: sudo compatibility, tee for redirection, proper permission handling
 # Tested on: Ubuntu 22.04 LTS + Zimbra 10.1.x OSE (Maldua Build)
 # Author: Qwen (AI) | License: MIT
+# Usage: sudo bash zimbra-letsencrypt.sh
 
 set -eo pipefail
 
@@ -14,14 +15,19 @@ log()  { echo -e "${BLUE}[INFO]${NC} $1" | tee -a "$LOG_FILE"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1" | tee -a "$LOG_FILE"; }
 err()  { echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || err "Script must be run as root."
+# ─────────────────────────────────────────────────────────────────────────────
+# ROOT CHECK (Wajib root atau sudo)
+# ─────────────────────────────────────────────────────────────────────────────
+if [ "$(id -u)" -ne 0 ]; then
+  err "Script must be run as root. Use: sudo bash $0"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PREREQUISITE CHECKS
 # ─────────────────────────────────────────────────────────────────────────────
 if [ -f /etc/os-release ]; then
   . /etc/os-release
-  [ "$ID" = "ubuntu" ] || err "Script ini dioptimalkan untuk Ubuntu. OS: $PRETTY_NAME"
+  [ "$ID" = "ubuntu" ] || warn "Script tested on Ubuntu. OS: $PRETTY_NAME"
 else
   err "Cannot detect OS."
 fi
@@ -101,7 +107,7 @@ fi
 log "Certificate issued successfully."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DEPLOY TO ZIMBRA (Fixed: Add Root CA for Chain Validation)
+# DEPLOY TO ZIMBRA (Fixed: tee for sudo compatibility)
 # ─────────────────────────────────────────────────────────────────────────────
 LE_DIR="/etc/letsencrypt/live/$FQDN"
 log "Preparing certificates for Zimbra..."
@@ -112,10 +118,12 @@ cp "$LE_DIR/fullchain.pem" "$SSL_DIR/commercial.crt"
 # 2. commercial.key = Private Key
 cp "$LE_DIR/privkey.pem" "$SSL_DIR/commercial.key"
 
-# 3. commercial_ca.crt = Intermediate + Root CA (Fix untuk verifycrt)
+# 3. commercial_ca.crt = Intermediate + Root CA (FIXED: tee instead of >>)
 cp "$LE_DIR/chain.pem" "$SSL_DIR/commercial_ca.crt"
 log "Downloading ISRG Root X1 for complete chain validation..."
-curl -s --connect-timeout 10 https://letsencrypt.org/certs/isrgrootx1.pem >> "$SSL_DIR/commercial_ca.crt" || \
+
+# Gunakan tee agar compatible dengan sudo (fix redirection issue)
+curl -s --connect-timeout 10 https://letsencrypt.org/certs/isrgrootx1.pem | tee -a "$SSL_DIR/commercial_ca.crt" > /dev/null || \
   warn "Gagal download Root CA. Verifikasi mungkin gagal jika tidak ada internet."
 
 # 4. Permission
@@ -130,7 +138,11 @@ if su - zimbra -c "/opt/zimbra/bin/zmcertmgr verifycrt comm $SSL_DIR/commercial.
   su - zimbra -c "/opt/zimbra/bin/zmcertmgr deploycrt comm $SSL_DIR/commercial.crt $SSL_DIR/commercial_ca.crt"
   log "✅ Certificate deployed."
 else
-  err "Verification failed. Check /opt/zimbra/log/zzdeploy.log"
+  log "⚠️ Verification warning. Checking alternate log..."
+  if [ -f /opt/zimbra/log/zmcertmgr.log ]; then
+    tail -50 /opt/zimbra/log/zmcertmgr.log
+  fi
+  err "Verification failed. Check /opt/zimbra/log/zmcertmgr.log"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,13 +177,12 @@ su - zimbra -c "zmproxyctl stop; zmmailboxdctl stop" 2>/dev/null || true
 certbot renew --quiet --cert-name "$FQDN" --standalone --register-unsafely-without-email || { echo "[$(date)] Renewal failed"; su - zimbra -c "zmcontrol start"; exit 1; }
 
 if [ -d "$LE_DIR" ]; then
-  # Copy certificates
   cp "$LE_DIR/fullchain.pem" "$SSL_DIR/commercial.crt"
   cp "$LE_DIR/privkey.pem" "$SSL_DIR/commercial.key"
   cp "$LE_DIR/chain.pem" "$SSL_DIR/commercial_ca.crt"
   
-  # Add Root CA ISRG X1 (CRITICAL for Zimbra verification)
-  curl -s --connect-timeout 10 https://letsencrypt.org/certs/isrgrootx1.pem >> "$SSL_DIR/commercial_ca.crt"
+  # FIXED: Gunakan tee untuk sudo compatibility
+  curl -s --connect-timeout 10 https://letsencrypt.org/certs/isrgrootx1.pem | tee -a "$SSL_DIR/commercial_ca.crt" > /dev/null
   
   chown zimbra:zimbra "$SSL_DIR"/*
   chmod 600 "$SSL_DIR/commercial.key"
