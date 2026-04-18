@@ -29,8 +29,8 @@ cd zimbra-scripts
 ```
 ### 2. Jalankan Pre-Install Script
 ```bash
-chmod +x scripts/zimbra_preinstall.sh
-sudo bash scripts/zimbra_preinstall.sh
+chmod +x zimbra-preinstall.sh
+sudo ./zimbra-preinstall.sh
 ```
 ### 3. Instal Zimbra
 Download installer Zimbra dari sumber resmi, lalu jalankan:
@@ -39,14 +39,14 @@ Download installer Zimbra dari sumber resmi, lalu jalankan:
 ```
 ### 4. Setup SSL
 ```bash
-chmod +x scripts/zimbra_letsencrypt.sh
-sudo bash scripts/zimbra_letsencrypt.sh
+chmod +x zimbra-letsencrypt.sh
+sudo ./zimbra-letsencrypt.sh
 ```
 ---
 ## 📖 Dokumentasi Lengkap
 Dokumentasi detail untuk setiap script tersedia di folder [_docs/_](docs/):
-* [_zimbra_preinstall.md_](docs/zimbra_preinstall.md) - Panduan lengkap pre-installation
-* [_zimbra_letsencrypt.md_](docs/zimbra_letsencrypt.md) - Panduan SSL Let's Encrypt
+* [_zimbra-preinstall.md_](docs/zimbra-preinstall.md) - Panduan lengkap pre-installation
+* [_zimbra-letsencrypt.md_](docs/zimbra-letsencrypt.md) - Panduan SSL Let's Encrypt
 ---
 ## ⚙️ Persyaratan Sistem
 ### Minimum
@@ -70,7 +70,7 @@ Dokumentasi detail untuk setiap script tersedia di folder [_docs/_](docs/):
 ## 🛠️ Troubleshooting
 | Masalah | Solusi |
 |---------|--------|
-| Script berhenti di tengah | Cek log di ```/var/log/zimbra_preinstall_*.log```() |
+| Script berhenti di tengah | Cek log di ```/var/log/zimbra-preinstall_*.log```() |
 | UFW inactive | Konfigurasi Security Group di cloud provider |
 | SSL verification failed | Tambahkan Root CA ISRG X1 ke commercial_ca.crt |
 | Fail2Ban tidak start | Pastikan ```/opt/zimbra/log/audit.log``` ada |
