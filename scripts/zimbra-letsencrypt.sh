@@ -1,7 +1,8 @@
 #!/bin/bash
-# zimbra_letsencrypt.sh v1.2
-# Fixed: dash compatibility, certbot package, variable quoting, error handling
-# Tested on: Ubuntu 22.04 LTS + Zimbra 10.1.16 OSE
+# zimbra-letsencrypt.sh v1.3
+# Automated Let's Encrypt SSL issuance & deployment for Zimbra 10.x
+# Fixed: Certificate chain validation with Root CA ISRG X1
+# Tested on: Ubuntu 22.04 LTS + Zimbra 10.1.x OSE (Maldua Build)
 # Author: Qwen (AI) | License: MIT
 
 set -eo pipefail
@@ -15,6 +16,9 @@ err()  { echo -e "${RED}[ERROR]${NC} $1" | tee -a "$LOG_FILE"; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || err "Script must be run as root."
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PREREQUISITE CHECKS
+# ─────────────────────────────────────────────────────────────────────────────
 if [ -f /etc/os-release ]; then
   . /etc/os-release
   [ "$ID" = "ubuntu" ] || err "Script ini dioptimalkan untuk Ubuntu. OS: $PRETTY_NAME"
@@ -24,20 +28,25 @@ fi
 
 log "Detected OS: $PRETTY_NAME"
 
+# Check Zimbra installation
+if [ ! -x /opt/zimbra/bin/zmcontrol ]; then
+  err "Zimbra not installed or not found at /opt/zimbra."
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # USER INPUT
 # ─────────────────────────────────────────────────────────────────────────────
-read -rp "FQDN Zimbra (contoh: nmail.newbienotes.my.id): " FQDN
+read -rp "FQDN Zimbra (contoh: mail.example.com): " FQDN
 read -rp "Email ACME recovery (opsional, tekan Enter untuk skip): " LE_EMAIL
 
 [ -z "$FQDN" ] && err "FQDN wajib diisi."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# INSTALL CERTBOT (Correct Package for Ubuntu 22.04)
+# INSTALL CERTBOT
 # ─────────────────────────────────────────────────────────────────────────────
 log "Installing Certbot & dependencies..."
 apt-get update -y
-apt-get install -y certbot
+apt-get install -y certbot curl
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PREPARE ZIMBRA SSL DIR
@@ -62,23 +71,27 @@ log "Requesting Let's Encrypt certificate for $FQDN..."
 if [ -n "$LE_EMAIL" ]; then
   certbot certonly \
     --standalone \
-    --preferred-chain "ISRG Root X1" \
+    --preferred-challenges http \
     -d "$FQDN" \
     --email "$LE_EMAIL" \
     --agree-tos \
     --non-interactive \
-    --key-type rsa \
+    --expand \
+    --keep-until-expiring \
+    --cert-name "$FQDN" \
     2>&1 | tee -a "$LOG_FILE"
 else
   warn "Email skipped. Account recovery will be limited."
   certbot certonly \
     --standalone \
-    --preferred-chain "ISRG Root X1" \
+    --preferred-challenges http \
     -d "$FQDN" \
     --register-unsafely-without-email \
     --agree-tos \
     --non-interactive \
-    --key-type rsa \
+    --expand \
+    --keep-until-expiring \
+    --cert-name "$FQDN" \
     2>&1 | tee -a "$LOG_FILE"
 fi
 
@@ -88,17 +101,37 @@ fi
 log "Certificate issued successfully."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DEPLOY TO ZIMBRA
+# DEPLOY TO ZIMBRA (Fixed: Add Root CA for Chain Validation)
 # ─────────────────────────────────────────────────────────────────────────────
 LE_DIR="/etc/letsencrypt/live/$FQDN"
-log "Copying & deploying certificates to Zimbra..."
-cp "$LE_DIR/cert.pem" "$SSL_DIR/commercial.crt"
-cp "$LE_DIR/privkey.pem" "$SSL_DIR/commercial.key"
-cp "$LE_DIR/fullchain.pem" "$SSL_DIR/commercial_ca.crt"
-chown zimbra:zimbra "$SSL_DIR"/*
+log "Preparing certificates for Zimbra..."
 
-su - zimbra -c "/opt/zimbra/bin/zmcertmgr verifycrt comm $SSL_DIR/commercial.key $SSL_DIR/commercial.crt $SSL_DIR/commercial_ca.crt" || err "Verification failed."
-su - zimbra -c "/opt/zimbra/bin/zmcertmgr deploycrt comm $SSL_DIR/commercial.crt $SSL_DIR/commercial_ca.crt" || err "Deployment failed."
+# 1. commercial.crt = Fullchain (Leaf + Intermediate)
+cp "$LE_DIR/fullchain.pem" "$SSL_DIR/commercial.crt"
+
+# 2. commercial.key = Private Key
+cp "$LE_DIR/privkey.pem" "$SSL_DIR/commercial.key"
+
+# 3. commercial_ca.crt = Intermediate + Root CA (Fix untuk verifycrt)
+cp "$LE_DIR/chain.pem" "$SSL_DIR/commercial_ca.crt"
+log "Downloading ISRG Root X1 for complete chain validation..."
+curl -s --connect-timeout 10 https://letsencrypt.org/certs/isrgrootx1.pem >> "$SSL_DIR/commercial_ca.crt" || \
+  warn "Gagal download Root CA. Verifikasi mungkin gagal jika tidak ada internet."
+
+# 4. Permission
+chown zimbra:zimbra "$SSL_DIR"/*
+chmod 600 "$SSL_DIR/commercial.key"
+chmod 644 "$SSL_DIR/commercial.crt" "$SSL_DIR/commercial_ca.crt"
+
+# 5. Verify & Deploy
+log "Verifying certificate..."
+if su - zimbra -c "/opt/zimbra/bin/zmcertmgr verifycrt comm $SSL_DIR/commercial.key $SSL_DIR/commercial.crt $SSL_DIR/commercial_ca.crt" 2>&1 | grep -q "success"; then
+  log "✅ Verification successful."
+  su - zimbra -c "/opt/zimbra/bin/zmcertmgr deploycrt comm $SSL_DIR/commercial.crt $SSL_DIR/commercial_ca.crt"
+  log "✅ Certificate deployed."
+else
+  err "Verification failed. Check /opt/zimbra/log/zzdeploy.log"
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESTART & VERIFY
@@ -132,10 +165,18 @@ su - zimbra -c "zmproxyctl stop; zmmailboxdctl stop" 2>/dev/null || true
 certbot renew --quiet --cert-name "$FQDN" --standalone --register-unsafely-without-email || { echo "[$(date)] Renewal failed"; su - zimbra -c "zmcontrol start"; exit 1; }
 
 if [ -d "$LE_DIR" ]; then
-  cp "$LE_DIR/cert.pem" "$SSL_DIR/commercial.crt"
+  # Copy certificates
+  cp "$LE_DIR/fullchain.pem" "$SSL_DIR/commercial.crt"
   cp "$LE_DIR/privkey.pem" "$SSL_DIR/commercial.key"
-  cp "$LE_DIR/fullchain.pem" "$SSL_DIR/commercial_ca.crt"
+  cp "$LE_DIR/chain.pem" "$SSL_DIR/commercial_ca.crt"
+  
+  # Add Root CA ISRG X1 (CRITICAL for Zimbra verification)
+  curl -s --connect-timeout 10 https://letsencrypt.org/certs/isrgrootx1.pem >> "$SSL_DIR/commercial_ca.crt"
+  
   chown zimbra:zimbra "$SSL_DIR"/*
+  chmod 600 "$SSL_DIR/commercial.key"
+  chmod 644 "$SSL_DIR/commercial.crt" "$SSL_DIR/commercial_ca.crt"
+  
   su - zimbra -c "/opt/zimbra/bin/zmcertmgr deploycrt comm $SSL_DIR/commercial.crt $SSL_DIR/commercial_ca.crt"
   su - zimbra -c "zmcontrol restart"
   echo "[$(date)] Certificate renewed & deployed successfully."
@@ -148,7 +189,7 @@ RENEW_EOF
 chmod +x "$RENEW_SCRIPT"
 
 log "Adding weekly renewal cron job..."
-echo "0 3 * * 1 root $RENEW_SCRIPT $(hostname -f) >> /var/log/zimbra-le-renew.log 2>&1" > /etc/cron.d/zimbra-le-renew
+echo "0 3 * * 1 root $RENEW_SCRIPT $FQDN >> /var/log/zimbra-le-renew.log 2>&1" > /etc/cron.d/zimbra-le-renew
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FINAL SUMMARY
@@ -162,7 +203,7 @@ echo -e "Zimbra SSL : $SSL_DIR/"
 echo -e "Auto-Renew : Every Monday 03:00 (cron)"
 echo -e "Log File   : $LOG_FILE"
 echo -e "${YELLOW}Verifikasi:${NC}"
-echo -e "• Buka https://$FQYN di browser"
+echo -e "• Buka https://$FQDN di browser"
 echo -e "• CLI: su - zimbra -c 'zmcertmgr viewdeployedcrt'"
 echo -e "${GREEN}========================================================${NC}\n"
 
