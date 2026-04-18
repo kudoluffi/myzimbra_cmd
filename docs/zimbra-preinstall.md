@@ -103,7 +103,15 @@ nmap -p 25,80,443,587,993 <IP_SERVER>
 fail2ban-client status zimbra-auth
 # Setelah Zimbra install & jail enabled
 ```
-
+---
+## Download dan Install Zimbra Foss from Maldua
+https://maldua.github.io/zimbra-foss/downloads/stable.html
+```bash
+wget https://github.com/maldua/zimbra-foss/releases/download/zimbra-foss-build-ubuntu-22.04/10.1.16.p1/zcs-10.1.16_GA_4200001.UBUNTU22_64.20260310121616.tgz
+tar -xvf zcs-10.1.16_GA_4200001.UBUNTU22_64.20260310121616.tgz
+cd zcs-10.1.16_GA_4200001.UBUNTU22_64.20260310121616
+sudo ./install.sh
+```
 ---
 ## 📦 Post-Installation
 Setelah Zimbra Selesai Install:
