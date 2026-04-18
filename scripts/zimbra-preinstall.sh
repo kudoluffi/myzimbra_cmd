@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# zimbra_preinstall.sh v14.5
+# zimbra-preinstall.sh v14.5
 # Fixed: Broken apt-get chain, safe chrony fallback, Ubuntu 22.04 + Zimbra 10.1.16 OSE (Maldua)
 # Author: Qwen (AI) | License: MIT | Use at your own risk in production!
 
@@ -32,11 +32,10 @@ log "Detected OS: $PRETTY_NAME"
 # ─────────────────────────────────────────────────────────────────────────────
 read -rp "FQDN (mail.example.com): " FQDN
 read -rp "IP Internal Server: " SERVER_IP
-read -rp "IP Gateway: " GATEWAY_IP
 read -rp "Upstream DNS (8.8.8.8/1.1.1.1): " UPSTREAM_DNS
 read -rp "Domain Email (example.com): " MAIL_DOMAIN
 
-[[ -z "$FQDN" || -z "$SERVER_IP" || -z "$GATEWAY_IP" || -z "$UPSTREAM_DNS" || -z "$MAIL_DOMAIN" ]] && err "Semua field wajib diisi."
+[[ -z "$FQDN" || -z "$SERVER_IP" || -z "$UPSTREAM_DNS" || -z "$MAIL_DOMAIN" ]] && err "Semua field wajib diisi."
 HOSTNAME_SHORT="${FQDN%%.*}"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -46,7 +45,7 @@ log "Updating system & installing core dependencies..."
 apt-get update -y
 apt-get upgrade -y
 apt-get install -y \
-  dnsutils net-tools sysstat unzip pax sqlite3 perl libperl5.34 libdbi-perl chrony \
+  dnsutils net-tools sysstat unzip pax sqlite3 perl libperl5.34 libdbi-perl \
   libnet-dns-perl libexpat1 libssl-dev libxml2-dev libgomp1 libpq5 libpcre2-8-0
 
 # Install optional/legacy packages safely
@@ -54,7 +53,7 @@ apt-get install -y libpcre3 2>/dev/null || warn "libpcre3 tidak tersedia di repo
 
 # Install security & firewall packages
 log "Installing UFW, Fail2Ban & Chrony..."
-apt-get install -y ufw fail2ban
+apt-get install -y ufw fail2ban chrony
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DISABLE CONFLICTING SERVICES
@@ -91,7 +90,6 @@ domain=${MAIL_DOMAIN}
 mx-host=${MAIL_DOMAIN},${FQDN},10
 local=/${MAIL_DOMAIN}/
 server=${UPSTREAM_DNS}
-server=${GATEWAY_IP}
 addn-hosts=/etc/hosts
 cache-size=1000
 dns-forward-max=150
@@ -171,7 +169,7 @@ filter   = zimbra-auth
 action   = ufw
 logpath  = /opt/zimbra/log/audit.log
 maxretry = 3
-findtime = 3600
+findtime = 1800
 bantime  = 86400
 ignoremissing = true
 backend  = auto
