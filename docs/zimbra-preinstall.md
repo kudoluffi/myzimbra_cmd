@@ -39,7 +39,7 @@ chmod +x zimbra-preinstall.sh
 sudo ./zimbra-preinstall.sh
 ```
 ### 3. Input Konfigurasi
-Script akan meminta 5 informasi:
+Script akan meminta 4 informasi:
 ```bash
 FQDN (mail.example.com):
 IP Internal Server:
