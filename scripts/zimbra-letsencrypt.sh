@@ -1,5 +1,5 @@
 #!/bin/bash
-# zimbra-letsencrypt.sh v1.3.4
+# zimbra-letsencrypt.sh v1.3.6
 # Automated Let's Encrypt SSL issuance & deployment for Zimbra 10.x
 # DEBUG VERSION: Extra logging & verification before deploy
 # Fixed: sudo compatibility, tee for redirection, proper permission handling
@@ -108,32 +108,15 @@ fi
 log "Certificate issued successfully."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DEPLOY TO ZIMBRA (v1.3.4: Extra Debug & Verification)
+# DEPLOY TO ZIMBRA (v1.3.6: Remove invalid size/grep checks)
 # ─────────────────────────────────────────────────────────────────────────────
 LE_DIR="/etc/letsencrypt/live/$FQDN"
 SSL_DIR="/opt/zimbra/ssl/letsencrypt"
 ZIMBRA_SSL_DIR="/opt/zimbra/ssl/zimbra/commercial"
 
 log "Preparing certificates for Zimbra..."
-log "LE_DIR: $LE_DIR"
-log "SSL_DIR: $SSL_DIR"
-log "ZIMBRA_SSL_DIR: $ZIMBRA_SSL_DIR"
 
-# Verify source files exist
-if [ ! -f "$LE_DIR/fullchain.pem" ]; then
-  err "Source file not found: $LE_DIR/fullchain.pem"
-fi
-
-# Copy certificates to BOTH directories
-for dir in "$SSL_DIR" "$ZIMBRA_SSL_DIR"; do
-  log "Copying certificates to $dir..."
-  mkdir -p "$dir"
-  cp -v "$LE_DIR/fullchain.pem" "$dir/commercial.crt" 2>&1 | tee -a "$LOG_FILE"
-  cp -v "$LE_DIR/privkey.pem" "$dir/commercial.key" 2>&1 | tee -a "$LOG_FILE"
-  cp -v "$LE_DIR/chain.pem" "$dir/commercial_ca.crt" 2>&1 | tee -a "$LOG_FILE"
-done
-
-# Hardcoded Root CA
+# Hardcoded Root CA (sama seperti sebelumnya)
 ROOTCA="-----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
 TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
@@ -166,48 +149,39 @@ mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
 emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
 -----END CERTIFICATE-----"
 
+# Copy & Append Root CA to ALL directories
 for dir in "$SSL_DIR" "$ZIMBRA_SSL_DIR"; do
-  log "Appending Root CA to $dir/commercial_ca.crt..."
+  mkdir -p "$dir"
+  cp "$LE_DIR/fullchain.pem" "$dir/commercial.crt"
+  cp "$LE_DIR/privkey.pem" "$dir/commercial.key"
+  cp "$LE_DIR/chain.pem" "$dir/commercial_ca.crt"
   echo "$ROOTCA" >> "$dir/commercial_ca.crt"
   
-  log "Setting permissions for $dir..."
-  chown -v zimbra:zimbra "$dir"/* 2>&1 | tee -a "$LOG_FILE"
-  chmod -v 600 "$dir/commercial.key" 2>&1 | tee -a "$LOG_FILE"
-  chmod -v 644 "$dir/commercial.crt" "$dir/commercial_ca.crt" 2>&1 | tee -a "$LOG_FILE"
+  # Set permissions
+  chown zimbra:zimbra "$dir"/*
+  chmod 600 "$dir/commercial.key"
+  chmod 644 "$dir/commercial.crt" "$dir/commercial_ca.crt"
   
-  # VERIFIKASI EKSPLESIT
-  CA_SIZE=$(wc -c < "$dir/commercial_ca.crt")
-  log "commercial_ca.crt size: $CA_SIZE bytes (expected >5000)"
-  
-  if [ "$CA_SIZE" -lt 5000 ]; then
-    err "commercial_ca.crt terlalu kecil ($CA_SIZE bytes) di $dir"
-  fi
-  
-  if ! grep -q "ISRG Root X1" "$dir/commercial_ca.crt"; then
-    err "ISRG Root X1 tidak ditemukan di $dir/commercial_ca.crt"
-  fi
-  
-  log "✅ Verification passed for $dir"
+  log "  ✓ Processed: $dir"
 done
 
-# Tampilkan isi file untuk debug
-log "=== commercial_ca.crt header & footer ==="
-head -2 "$ZIMBRA_SSL_DIR/commercial_ca.crt" | tee -a "$LOG_FILE"
-tail -2 "$ZIMBRA_SSL_DIR/commercial_ca.crt" | tee -a "$LOG_FILE"
-
-# Verify & Deploy
-log "Verifying certificate..."
+# Verify & Deploy (langsung ke zmcertmgr, tanpa check size/grep yang salah)
+log "Verifying certificate with zmcertmgr..."
 VERIFY_OUTPUT=$(su - zimbra -c "/opt/zimbra/bin/zmcertmgr verifycrt comm $SSL_DIR/commercial.key $SSL_DIR/commercial.crt $SSL_DIR/commercial_ca.crt" 2>&1)
 echo "$VERIFY_OUTPUT" | tee -a "$LOG_FILE"
 
 if echo "$VERIFY_OUTPUT" | grep -q "success"; then
   log "✅ Verification successful."
-  su - zimbra -c "/opt/zimbra/bin/zmcertmgr deploycrt comm $ZIMBRA_SSL_DIR/commercial.crt $ZIMBRA_SSL_DIR/commercial_ca.crt" 2>&1 | tee -a "$LOG_FILE"
+  su - zimbra -c "/opt/zimbra/bin/zmcertmgr deploycrt comm $ZIMBRA_SSL_DIR/commercial.crt $ZIMBRA_SSL_DIR/commercial_ca.crt"
   log "✅ Certificate deployed."
 else
-  log "❌ Verification failed!"
-  log "Output: $VERIFY_OUTPUT"
-  err "Verification failed. Check log: $LOG_FILE"
+  log "❌ Verification output: $VERIFY_OUTPUT"
+  # Tampilkan info debug
+  log "Debug info:"
+  log "  - commercial.key owner: $(ls -l $ZIMBRA_SSL_DIR/commercial.key | awk '{print $3":"$4}')"
+  log "  - commercial.key perms: $(stat -c %a $ZIMBRA_SSL_DIR/commercial.key)"
+  log "  - commercial_ca.crt certs count: $(grep -c 'BEGIN CERTIFICATE' $ZIMBRA_SSL_DIR/commercial_ca.crt)"
+  err "Verification failed. Check zmcertmgr output above."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
