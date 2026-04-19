@@ -163,8 +163,14 @@ Catatan: -all = hard fail (email dari IP lain ditolak), ~all = soft fail (masuk 
 ---
 
 ## 🔗 Referensi
-* [Zimbra DKIM Documentation](https://wiki.zimbra.com/wiki/Configuring_DKIM?spm=a2ty_o01.29997173.0.0.48ea55fba8kSFe)
-* [DKIM.org](https://wiki.zimbra.com/wiki/Configuring_DKIM?spm=a2ty_o01.29997173.0.0.48ea55fba8kSFe)
-* [MXToolbox DKIM Check](https://mxtoolbox.com/dkim.aspx?spm=a2ty_o01.29997173.0.0.48ea55fba8kSFe)
-* [DMARC.org](https://dmarc.org/?spm=a2ty_o01.29997173.0.0.48ea55fba8kSFe)
-* [Mail-Tester.com](https://www.mail-tester.com/?spm=a2ty_o01.29997173.0.0.48ea55fba8kSFe)
+
+### DNS & Email Tools
+- 🔐 **MXToolbox DKIM:** [https://mxtoolbox.com/dkim.aspx](https://mxtoolbox.com/dkim.aspx)
+- 📧 **MXToolbox SPF:** [https://mxtoolbox.com/spf.aspx](https://mxtoolbox.com/spf.aspx)
+- 🔒 **MXToolbox DMARC:** [https://mxtoolbox.com/dmarc.aspx](https://mxtoolbox.com/dmarc.aspx)
+- ✉️ **Mail-Tester:** [https://www.mail-tester.com/](https://www.mail-tester.com/)
+
+### Documentation
+- 📖 **Zimbra DKIM Wiki:** [https://wiki.zimbra.com/wiki/Configuring_DKIM](https://wiki.zimbra.com/wiki/Configuring_DKIM)
+- 🌐 **DKIM.org:** [https://dkim.org/](https://dkim.org/)
+- 🛡️ **DMARC.org:** [https://dmarc.org/](https://dmarc.org/)
