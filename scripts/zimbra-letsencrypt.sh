@@ -1,8 +1,9 @@
 #!/bin/bash
-# zimbra-letsencrypt.sh v1.3.7
-# FINAL FIX: Check for "OK" instead of "success" in zmcertmgr output
-# Usage: sudo bash zimbra-letsencrypt.sh
+# zimbra-letsencrypt.sh v1.3.8
+# FINAL: Integrated certbot.timer disable + full Zimbra deployment
+# Tested on: Ubuntu 22.04 LTS + Zimbra 10.1.x OSE (Maldua Build)
 # Author: Qwen (AI) | License: MIT
+# Usage: sudo bash zimbra-letsencrypt.sh
 
 set -eo pipefail
 
@@ -47,6 +48,23 @@ apt-get update -y
 apt-get install -y certbot curl
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DISABLE CERTBOT TIMER (Use Custom Cron Instead)
+# ─────────────────────────────────────────────────────────────────────────────
+log "Configuring auto-renewal mechanism..."
+if systemctl is-active --quiet certbot.timer; then
+  log "Disabling Certbot timer (certbot.timer)..."
+  systemctl disable --now certbot.timer 2>/dev/null || warn "Failed to disable certbot.timer"
+  
+  if ! systemctl is-active --quiet certbot.timer; then
+    log "✅ Certbot timer disabled successfully."
+  else
+    warn "⚠️ Certbot timer still active. May cause duplicate renewal checks."
+  fi
+else
+  log "ℹ️  Certbot timer already inactive."
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PREPARE DIRECTORIES
 # ─────────────────────────────────────────────────────────────────────────────
 SSL_DIR="/opt/zimbra/ssl/letsencrypt"
@@ -82,7 +100,7 @@ fi
 log "Certificate issued successfully."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DEPLOY TO ZIMBRA (v1.3.7: Check for "OK" instead of "success")
+# DEPLOY TO ZIMBRA (v1.3.8: Check for "OK" instead of "success")
 # ─────────────────────────────────────────────────────────────────────────────
 LE_DIR="/etc/letsencrypt/live/$FQDN"
 log "Preparing certificates for Zimbra..."
@@ -164,7 +182,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SETUP AUTO-RENEWAL
+# SETUP AUTO-RENEWAL (Custom Cron Only)
 # ─────────────────────────────────────────────────────────────────────────────
 RENEW_SCRIPT="/usr/local/bin/zimbra-le-renew.sh"
 log "Creating auto-renewal script..."
@@ -247,11 +265,15 @@ echo -e "${GREEN}========================================================${NC}"
 echo -e "Domain     : $FQDN"
 echo -e "Cert Path  : /etc/letsencrypt/live/$FQDN/"
 echo -e "Zimbra SSL : $SSL_DIR/ & $ZIMBRA_SSL_DIR/"
-echo -e "Auto-Renew : Every Monday 03:00 (cron)"
+echo -e "Auto-Renew : Every Monday 03:00 (custom cron)"
+echo -e "Certbot Timer: DISABLED (using custom cron only)"
 echo -e "Log File   : $LOG_FILE"
+echo -e "Renewal Log: /var/log/zimbra-le-renew.log"
 echo -e "${YELLOW}Verifikasi:${NC}"
 echo -e "• Buka https://$FQDN di browser"
 echo -e "• CLI: su - zimbra -c 'zmcertmgr viewdeployedcrt'"
+echo -e "• Cek cron: cat /etc/cron.d/zimbra-le-renew"
+echo -e "• Cek timer: systemctl status certbot.timer (harus inactive)"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Script selesai. SSL Zimbra aktif & auto-renewal dikonfigurasi."
