@@ -107,31 +107,33 @@ fi
 log "Certificate issued successfully."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DEPLOY TO ZIMBRA (v1.3.2: Copy ke 2 lokasi)
+# DEPLOY TO ZIMBRA (v1.3.4: Extra Debug & Verification)
 # ─────────────────────────────────────────────────────────────────────────────
 LE_DIR="/etc/letsencrypt/live/$FQDN"
 SSL_DIR="/opt/zimbra/ssl/letsencrypt"
 ZIMBRA_SSL_DIR="/opt/zimbra/ssl/zimbra/commercial"
 
 log "Preparing certificates for Zimbra..."
+log "LE_DIR: $LE_DIR"
+log "SSL_DIR: $SSL_DIR"
+log "ZIMBRA_SSL_DIR: $ZIMBRA_SSL_DIR"
 
-# Buat kedua direktori
-mkdir -p "$SSL_DIR" "$ZIMBRA_SSL_DIR"
+# Verify source files exist
+if [ ! -f "$LE_DIR/fullchain.pem" ]; then
+  err "Source file not found: $LE_DIR/fullchain.pem"
+fi
 
-# 1. Copy ke direktori letsencrypt (backup)
-cp "$LE_DIR/fullchain.pem" "$SSL_DIR/commercial.crt"
-cp "$LE_DIR/privkey.pem" "$SSL_DIR/commercial.key"
-cp "$LE_DIR/chain.pem" "$SSL_DIR/commercial_ca.crt"
-
-# 2. Copy ke direktori Zimbra (WAJIB untuk deploycrt)
-cp "$LE_DIR/fullchain.pem" "$ZIMBRA_SSL_DIR/commercial.crt"
-cp "$LE_DIR/privkey.pem" "$ZIMBRA_SSL_DIR/commercial.key"
-cp "$LE_DIR/chain.pem" "$ZIMBRA_SSL_DIR/commercial_ca.crt"
-
-# 3. Tambahkan Root CA ke KEDUA lokasi
+# Copy certificates to BOTH directories
 for dir in "$SSL_DIR" "$ZIMBRA_SSL_DIR"; do
-  cat >> "$dir/commercial_ca.crt" <<'ROOTCA'
------BEGIN CERTIFICATE-----
+  log "Copying certificates to $dir..."
+  mkdir -p "$dir"
+  cp -v "$LE_DIR/fullchain.pem" "$dir/commercial.crt" 2>&1 | tee -a "$LOG_FILE"
+  cp -v "$LE_DIR/privkey.pem" "$dir/commercial.key" 2>&1 | tee -a "$LOG_FILE"
+  cp -v "$LE_DIR/chain.pem" "$dir/commercial_ca.crt" 2>&1 | tee -a "$LOG_FILE"
+done
+
+# Hardcoded Root CA
+ROOTCA="-----BEGIN CERTIFICATE-----
 MIIFazCCA1OgAwIBAgIRAIIQz7DSQONZRGPgu2OCiwAwDQYJKoZIhvcNAQELBQAw
 TzELMAkGA1UEBhMCVVMxKTAnBgNVBAoTIEludGVybmV0IFNlY3VyaXR5IFJlc2Vh
 cmNoIEdyb3VwMRUwEwYDVQQDEwxJU1JHIFJvb3QgWDEwHhcNMTUwNjA0MTEwNDM4
@@ -161,27 +163,50 @@ oyi3B43njTOQ5yOf+1CceWxG1bQVs5ZufpsMljq4Ui0/1lvh+wjChP4kqKOJ2qxq
 4RgqsahDYVvTH9w7jXbyLeiNdd8XM2w9U/t7y0Ff/9yi0GE44Za4rF2LN9d11TPA
 mRGunUHBcnWEvgJBQl9nJEiU0Zsnvgc/ubhPgXRR4Xq37Z0j4r7g1SgEEzwxA57d
 emyPxgcYxn/eR44/KJ4EBs+lVDR3veyJm+kXQ99b21/+jh5Xos1AnX5iItreGCc=
------END CERTIFICATE-----
-ROOTCA
-done
+-----END CERTIFICATE-----"
 
-# 4. Permission untuk KEDUA direktori
 for dir in "$SSL_DIR" "$ZIMBRA_SSL_DIR"; do
-  chown zimbra:zimbra "$dir"/*
-  chmod 600 "$dir/commercial.key"
-  chmod 644 "$dir/commercial.crt" "$dir/commercial_ca.crt"
+  log "Appending Root CA to $dir/commercial_ca.crt..."
+  echo "$ROOTCA" >> "$dir/commercial_ca.crt"
+  
+  log "Setting permissions for $dir..."
+  chown -v zimbra:zimbra "$dir"/* 2>&1 | tee -a "$LOG_FILE"
+  chmod -v 600 "$dir/commercial.key" 2>&1 | tee -a "$LOG_FILE"
+  chmod -v 644 "$dir/commercial.crt" "$dir/commercial_ca.crt" 2>&1 | tee -a "$LOG_FILE"
+  
+  # VERIFIKASI EKSPLESIT
+  CA_SIZE=$(wc -c < "$dir/commercial_ca.crt")
+  log "commercial_ca.crt size: $CA_SIZE bytes (expected >5000)"
+  
+  if [ "$CA_SIZE" -lt 5000 ]; then
+    err "commercial_ca.crt terlalu kecil ($CA_SIZE bytes) di $dir"
+  fi
+  
+  if ! grep -q "ISRG Root X1" "$dir/commercial_ca.crt"; then
+    err "ISRG Root X1 tidak ditemukan di $dir/commercial_ca.crt"
+  fi
+  
+  log "✅ Verification passed for $dir"
 done
 
-# 5. Verify (gunakan direktori letsencrypt)
+# Tampilkan isi file untuk debug
+log "=== commercial_ca.crt header & footer ==="
+head -2 "$ZIMBRA_SSL_DIR/commercial_ca.crt" | tee -a "$LOG_FILE"
+tail -2 "$ZIMBRA_SSL_DIR/commercial_ca.crt" | tee -a "$LOG_FILE"
+
+# Verify & Deploy
 log "Verifying certificate..."
-if su - zimbra -c "/opt/zimbra/bin/zmcertmgr verifycrt comm $SSL_DIR/commercial.key $SSL_DIR/commercial.crt $SSL_DIR/commercial_ca.crt" 2>&1 | grep -q "success"; then
+VERIFY_OUTPUT=$(su - zimbra -c "/opt/zimbra/bin/zmcertmgr verifycrt comm $SSL_DIR/commercial.key $SSL_DIR/commercial.crt $SSL_DIR/commercial_ca.crt" 2>&1)
+echo "$VERIFY_OUTPUT" | tee -a "$LOG_FILE"
+
+if echo "$VERIFY_OUTPUT" | grep -q "success"; then
   log "✅ Verification successful."
-  
-  # 6. Deploy (akan baca dari direktori Zimbra)
-  su - zimbra -c "/opt/zimbra/bin/zmcertmgr deploycrt comm $ZIMBRA_SSL_DIR/commercial.crt $ZIMBRA_SSL_DIR/commercial_ca.crt"
+  su - zimbra -c "/opt/zimbra/bin/zmcertmgr deploycrt comm $ZIMBRA_SSL_DIR/commercial.crt $ZIMBRA_SSL_DIR/commercial_ca.crt" 2>&1 | tee -a "$LOG_FILE"
   log "✅ Certificate deployed."
 else
-  err "Verification failed."
+  log "❌ Verification failed!"
+  log "Output: $VERIFY_OUTPUT"
+  err "Verification failed. Check log: $LOG_FILE"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
