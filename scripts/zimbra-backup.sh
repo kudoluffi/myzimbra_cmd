@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-backup.sh v1.8
-# FINAL VERSION - Exclude system accounts, YYYYMMDD format, overwrite same-day backups
+# zimbra-backup.sh v1.9
+# OPTIMIZED - Removed redundant filter/signature backup (already in preferences)
 # Usage: sudo bash zimbra-backup.sh [full|incremental]
 
 set -u
@@ -16,7 +16,6 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 # CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 BACKUP_ROOT="/backup/zimbra"
-# CHANGED: YYYYMMDD format only (no HHMMSS)
 BACKUP_DATE=$(date +%Y%m%d)
 DAY_OF_WEEK=$(date +%u)
 RETENTION_DAYS=30
@@ -51,10 +50,10 @@ should_exclude() {
   local account="$1"
   for pattern in "${EXCLUDE_PATTERNS[@]}"; do
     if echo "$account" | grep -qE "$pattern"; then
-      return 0  # Should exclude
+      return 0
     fi
   done
-  return 1  # Should not exclude
+  return 1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -66,7 +65,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Backup Script (v1.8 - FINAL)${NC}"
+echo -e "${GREEN}  Zimbra Backup Script (v1.9 - OPTIMIZED)${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup Date: $BACKUP_DATE"
@@ -193,17 +192,15 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   done < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt"
   
   pass "   Password hashes backed up: $PASSWORD_BACKUP_COUNT accounts"
-  
   warn "   ⚠️  PASSWORD FILES ARE SENSITIVE!"
   warn "   ⚠️  Location: $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
-  warn "   ⚠️  Permission: 700 (zimbra only)"
 else
   warn "   Skipping password backup (no accounts found)"
   PASSWORD_BACKUP_COUNT=0
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. MAILBOX BACKUP (EXCLUDE SYSTEM ACCOUNTS)
+# 4. MAILBOX BACKUP
 # ─────────────────────────────────────────────────────────────────────────────
 log "4. Backing up mailboxes ($BACKUP_TYPE)..."
 
@@ -212,7 +209,6 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   BACKUP_FAILED=0
   SKIPPED_COUNT=0
   
-  # CHANGED: YYYYMMDD format only (will overwrite if run multiple times same day)
   mkdir -p "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
   chown zimbra:zimbra "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
   
@@ -221,7 +217,6 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
       continue
     fi
     
-    # CHECK: Skip excluded accounts
     if should_exclude "$account"; then
       log "   Skipping excluded account: $account"
       SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
@@ -231,7 +226,6 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
     ACCOUNT_NAME=$(echo "$account" | cut -d@ -f1)
     log "   Backing up: $account"
     
-    # CHANGED: YYYYMMDD format (overwrite if exists)
     MAILBOX_BACKUP_FILE="$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}.tgz"
     
     su - $ZIMBRA_USER -c "zmmailbox -z -m '$account' getRestURL '//?fmt=tgz' > '$MAILBOX_BACKUP_FILE'" 2>&1 | tee -a "$LOG_FILE"
@@ -248,7 +242,7 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   done < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt"
   
   echo ""
-  pass "   Mailbox backup: $BACKUP_SUCCESS success, $BACKUP_FAILED failed, $SKIPPED_COUNT skipped (system accounts)"
+  pass "   Mailbox backup: $BACKUP_SUCCESS success, $BACKUP_FAILED failed, $SKIPPED_COUNT skipped"
 else
   warn "   Skipping mailbox backup (no valid accounts found)"
   BACKUP_SUCCESS=0
@@ -256,25 +250,29 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. USER DATA (EXCLUDE SYSTEM ACCOUNTS)
+# 5. USER PREFERENCES (OPTIMIZED - No separate filter/signature backup)
 # ─────────────────────────────────────────────────────────────────────────────
-log "5. Backing up user data (filters, signatures, preferences)..."
+log "5. Backing up user preferences (includes signatures & filters)..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
-  USER_DATA_COUNT=0
+  USER_PREF_COUNT=0
   while IFS= read -r account; do
     if [ -n "$account" ] && echo "$account" | grep -q "@"; then
       if should_exclude "$account"; then
         continue
       fi
       ACCOUNT_NAME=$(echo "$account" | cut -d@ -f1)
+      
+      # Single command - includes ALL user settings (signatures, filters, etc)
       su - $ZIMBRA_USER -c "zmprov ga '$account' > '$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-preferences.txt'" 2>/dev/null
-      su - $ZIMBRA_USER -c "zmprov gf '$account' > '$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-filters.txt'" 2>/dev/null
-      su - $ZIMBRA_USER -c "zmprov gas '$account' > '$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-signatures.txt'" 2>/dev/null
-      USER_DATA_COUNT=$((USER_DATA_COUNT + 1))
+      
+      if [ -s "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-preferences.txt" ]; then
+        USER_PREF_COUNT=$((USER_PREF_COUNT + 1))
+      fi
     fi
   done < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt"
-  pass "   User data exported: $USER_DATA_COUNT accounts"
+  pass "   User preferences exported: $USER_PREF_COUNT accounts"
+  log "   ℹ️  Note: preferences.txt includes signatures, filters, and all user settings"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -294,7 +292,6 @@ else
   log "   No old backups to delete"
 fi
 
-# Clean old password backups
 OLD_PASS_BACKUPS=$(find "$BACKUP_ROOT/passwords" -type d -name "20*" -mtime +$RETENTION_DAYS 2>/dev/null)
 if [ -n "$OLD_PASS_BACKUPS" ]; then
   while IFS= read -r old_dir; do
@@ -303,7 +300,6 @@ if [ -n "$OLD_PASS_BACKUPS" ]; then
   pass "   Deleted old password backups"
 fi
 
-# Clean old config files (keep latest 10)
 log "   Cleaning old config files..."
 cd "$BACKUP_ROOT/config" && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm --
 pass "   Old config files cleaned"
@@ -318,7 +314,7 @@ TOTAL_BACKUP_SIZE=$(du -sh "$BACKUP_ROOT" 2>/dev/null | cut -f1)
 
 cat > "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt" <<EOF
 ========================================================
-  ZIMBRA BACKUP SUMMARY (v1.8 - FINAL)
+  ZIMBRA BACKUP SUMMARY (v1.9 - OPTIMIZED)
 ========================================================
 Backup Date:    $BACKUP_DATE
 Server:         $SERVER_NAME
@@ -332,18 +328,19 @@ Dist. Lists:    $DL_COUNT
 Password Hash : $PASSWORD_BACKUP_COUNT
 Mailbox Success: $BACKUP_SUCCESS
 Mailbox Failed : $BACKUP_FAILED
-System Accounts Skipped: $SKIPPED_COUNT
+System Skipped : $SKIPPED_COUNT
+User Preferences: $USER_PREF_COUNT
 ========================================================
 
 BACKUP INCLUDES:
-✅ Global Configuration
-✅ Server Configuration
-✅ Local Configuration
-✅ All Accounts List
-✅ All Distribution Lists
-✅ Password Hashes (user accounts only)
-✅ Mailboxes (user accounts only, TGZ)
-✅ User Preferences, Filters, Signatures
+✅ Global Configuration (zmprov gacf)
+✅ Server Configuration (zmprov gs)
+✅ Local Configuration (zmlocalconfig)
+✅ All Accounts List (zmprov -l gaa)
+✅ All Distribution Lists (zmprov gad -t distributionlist)
+✅ Password Hashes (user accounts only, .shadow files)
+✅ Mailboxes (user accounts only, TGZ via zmmailbox)
+✅ User Preferences (includes signatures & filters)
 
 EXCLUDED SYSTEM ACCOUNTS:
 ❌ admin@* (administrative)
@@ -359,6 +356,12 @@ EXCLUDED SYSTEM ACCOUNTS:
 🔒 Permission: 700 (zimbra:zimbra only)
 🔒 DO NOT share these files!
 🔒 DO NOT commit to version control!
+
+ℹ️  NOTE: User preferences.txt includes:
+   - Signatures (zimbraPrefSignature)
+   - Filters/Forwarding (zimbraPrefMailForwardingAddress)
+   - All other user settings
+   No separate backup needed for filters/signatures
 
 ========================================================
   RESTORE INSTRUCTIONS
@@ -392,6 +395,7 @@ echo -e "Password Hash : $PASSWORD_BACKUP_COUNT"
 echo -e "Mailbox Success: $BACKUP_SUCCESS"
 echo -e "Mailbox Failed : $BACKUP_FAILED"
 echo -e "System Skipped : $SKIPPED_COUNT"
+echo -e "User Preferences: $USER_PREF_COUNT"
 echo -e "Retention     : $RETENTION_DAYS days"
 echo -e "Backup Root   : $BACKUP_ROOT"
 echo -e "Log File      : $LOG_FILE"
