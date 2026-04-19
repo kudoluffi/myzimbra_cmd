@@ -1,6 +1,7 @@
 #!/bin/bash
-# zimbra-letsencrypt.sh v1.3.2
+# zimbra-letsencrypt.sh v1.3.4
 # Automated Let's Encrypt SSL issuance & deployment for Zimbra 10.x
+# DEBUG VERSION: Extra logging & verification before deploy
 # Fixed: sudo compatibility, tee for redirection, proper permission handling
 # Tested on: Ubuntu 22.04 LTS + Zimbra 10.1.x OSE (Maldua Build)
 # Author: Qwen (AI) | License: MIT
