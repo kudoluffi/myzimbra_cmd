@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-backup.sh v1.4
-# WORKING VERSION - Tested commands for Zimbra 10.1.x OSE
+# zimbra-backup.sh v1.7
+# FIXED: Correct permission for password files (zimbra:zimbra)
 # Usage: sudo bash zimbra-backup.sh [full|incremental]
 
 set -u
@@ -41,7 +41,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Backup Script (v1.4 - WORKING)${NC}"
+echo -e "${GREEN}  Zimbra Backup Script (v1.7 - FIXED PERMISSION)${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup Date: $BACKUP_DATE"
@@ -52,10 +52,13 @@ echo ""
 
 # Create backup directories
 log "Creating backup directories..."
-mkdir -p "$BACKUP_ROOT"/{config,mailboxes,distribution-lists,logs}
+mkdir -p "$BACKUP_ROOT"/{config,mailboxes,distribution-lists,passwords,logs}
+# FIX: Password folder owned by zimbra (so zimbra can write)
 chown -R zimbra:zimbra "$BACKUP_ROOT"
 chmod 755 "$BACKUP_ROOT"
 chmod 755 "$BACKUP_ROOT"/*
+# FIX: Password folder MORE RESTRICTIVE
+chmod 700 "$BACKUP_ROOT/passwords"
 pass "Backup directories created"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -63,7 +66,6 @@ pass "Backup directories created"
 # ─────────────────────────────────────────────────────────────────────────────
 log "1. Backing up Zimbra configuration..."
 
-# Global config
 log "   Exporting global config..."
 su - $ZIMBRA_USER -c "zmprov gacf > $BACKUP_ROOT/config/global-config-${BACKUP_DATE}.txt" 2>&1
 if [ -s "$BACKUP_ROOT/config/global-config-${BACKUP_DATE}.txt" ]; then
@@ -73,7 +75,6 @@ else
   fail "   Global config export failed"
 fi
 
-# Server config
 log "   Exporting server config..."
 su - $ZIMBRA_USER -c "zmprov gs $SERVER_NAME > $BACKUP_ROOT/config/server-config-${BACKUP_DATE}.txt" 2>&1
 if [ -s "$BACKUP_ROOT/config/server-config-${BACKUP_DATE}.txt" ]; then
@@ -82,7 +83,6 @@ else
   fail "   Server config export failed"
 fi
 
-# Local config
 log "   Exporting local config..."
 zmlocalconfig -m > "$BACKUP_ROOT/config/local-config-${BACKUP_DATE}.txt" 2>&1
 if [ -s "$BACKUP_ROOT/config/local-config-${BACKUP_DATE}.txt" ]; then
@@ -91,17 +91,15 @@ else
   fail "   Local config export failed"
 fi
 
-# Version info
 log "   Saving Zimbra version info..."
 su - $ZIMBRA_USER -c "zmcontrol -v > $BACKUP_ROOT/config/zimbra-version-${BACKUP_DATE}.txt" 2>&1
 pass "   Version info saved"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. ACCOUNTS & DISTRIBUTION LISTS (FIXED: Use -l flag!)
+# 2. ACCOUNTS & DISTRIBUTION LISTS
 # ─────────────────────────────────────────────────────────────────────────────
 log "2. Backing up accounts and distribution lists..."
 
-# All domains
 log "   Exporting domain list..."
 su - $ZIMBRA_USER -c "zmprov gad > $BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt" 2>&1
 if [ -s "$BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt" ]; then
@@ -112,20 +110,16 @@ else
   DOMAIN_COUNT=0
 fi
 
-# All accounts (FIXED: Use -l flag!)
 log "   Exporting account list (zmprov -l gaa)..."
 su - $ZIMBRA_USER -c "zmprov -l gaa > $BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt" 2>&1
 
-# VERIFY: Check if file contains actual emails, not help menu
 if [ -s "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt" ]; then
-  # Check if first line looks like an email (contains @)
   FIRST_LINE=$(head -1 "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt")
   if echo "$FIRST_LINE" | grep -q "@"; then
     ACCOUNT_COUNT=$(wc -l < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt")
     pass "   Found $ACCOUNT_COUNT account(s)"
   else
     fail "   Account list contains help menu instead of accounts!"
-    log "   First line: $FIRST_LINE"
     ACCOUNT_COUNT=0
   fi
 else
@@ -133,7 +127,6 @@ else
   ACCOUNT_COUNT=0
 fi
 
-# Distribution lists (FIXED: Use -l flag!)
 log "   Exporting distribution lists..."
 su - $ZIMBRA_USER -c "zmprov -l gad -t distributionlist > $BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt" 2>&1
 if [ -s "$BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt" ]; then
@@ -144,9 +137,52 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. MAILBOX BACKUP (Only if we have valid accounts)
+# 3. PASSWORD HASH BACKUP (FIXED PERMISSION!)
 # ─────────────────────────────────────────────────────────────────────────────
-log "3. Backing up mailboxes ($BACKUP_TYPE)..."
+log "3. Backing up password hashes..."
+
+if [ "$ACCOUNT_COUNT" -gt 0 ]; then
+  mkdir -p "$BACKUP_ROOT/passwords/${BACKUP_DATE}"
+  # FIX: Owned by zimbra (so zimbra can write AND restore script can read)
+  chown zimbra:zimbra "$BACKUP_ROOT/passwords/${BACKUP_DATE}"
+  chmod 700 "$BACKUP_ROOT/passwords/${BACKUP_DATE}"
+  
+  PASSWORD_BACKUP_COUNT=0
+  
+  while IFS= read -r account; do
+    if [ -n "$account" ] && echo "$account" | grep -q "@"; then
+      SAFE_NAME=$(echo "$account" | tr '@' '_')
+      
+      # Extract password hash
+      su - $ZIMBRA_USER -c "zmprov -l ga '$account' userPassword" 2>/dev/null | \
+        grep "userPassword:" | \
+        awk '{print $2}' > "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
+      
+      if [ -s "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow" ]; then
+        PASSWORD_BACKUP_COUNT=$((PASSWORD_BACKUP_COUNT + 1))
+        # FIX: Each file owned by zimbra, permission 600
+        chown zimbra:zimbra "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
+        chmod 600 "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
+      fi
+    fi
+  done < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt"
+  
+  pass "   Password hashes backed up: $PASSWORD_BACKUP_COUNT accounts"
+  
+  # SECURITY WARNING
+  warn "   ⚠️  PASSWORD FILES ARE SENSITIVE!"
+  warn "   ⚠️  Location: $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
+  warn "   ⚠️  Permission: 700 (zimbra only)"
+  warn "   ⚠️  Protect backup directory from unauthorized access!"
+else
+  warn "   Skipping password backup (no accounts found)"
+  PASSWORD_BACKUP_COUNT=0
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. MAILBOX BACKUP
+# ─────────────────────────────────────────────────────────────────────────────
+log "4. Backing up mailboxes ($BACKUP_TYPE)..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   BACKUP_SUCCESS=0
@@ -155,16 +191,8 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   mkdir -p "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
   chown zimbra:zimbra "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
   
-  # Read accounts from file (each line is one email address)
   while IFS= read -r account; do
-    # Skip empty lines
-    if [ -z "$account" ]; then
-      continue
-    fi
-    
-    # Skip if line doesn't look like an email
-    if ! echo "$account" | grep -q "@"; then
-      warn "   Skipping invalid line: $account"
+    if [ -z "$account" ] || ! echo "$account" | grep -q "@"; then
       continue
     fi
     
@@ -173,7 +201,6 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
     
     MAILBOX_BACKUP_FILE="$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}.tgz"
     
-    # Export mailbox using zmmailbox (OSE compatible)
     su - $ZIMBRA_USER -c "zmmailbox -z -m '$account' getRestURL '//?fmt=tgz' > '$MAILBOX_BACKUP_FILE'" 2>&1 | tee -a "$LOG_FILE"
     
     if [ -f "$MAILBOX_BACKUP_FILE" ] && [ -s "$MAILBOX_BACKUP_FILE" ]; then
@@ -196,9 +223,9 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. USER DATA
+# 5. USER DATA
 # ─────────────────────────────────────────────────────────────────────────────
-log "4. Backing up user data (filters, signatures, preferences)..."
+log "5. Backing up user data (filters, signatures, preferences)..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   while IFS= read -r account; do
@@ -213,9 +240,9 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. RETENTION POLICY
+# 6. RETENTION POLICY
 # ─────────────────────────────────────────────────────────────────────────────
-log "5. Applying retention policy ($RETENTION_DAYS days)..."
+log "6. Applying retention policy ($RETENTION_DAYS days)..."
 
 OLD_BACKUPS=$(find "$BACKUP_ROOT/mailboxes" -type d -name "20*" -mtime +$RETENTION_DAYS 2>/dev/null)
 if [ -n "$OLD_BACKUPS" ]; then
@@ -229,22 +256,31 @@ else
   log "   No old backups to delete"
 fi
 
+# Clean old password backups
+OLD_PASS_BACKUPS=$(find "$BACKUP_ROOT/passwords" -type d -name "20*" -mtime +$RETENTION_DAYS 2>/dev/null)
+if [ -n "$OLD_PASS_BACKUPS" ]; then
+  while IFS= read -r old_dir; do
+    rm -rf "$old_dir"
+  done <<< "$OLD_PASS_BACKUPS"
+  pass "   Deleted old password backups"
+fi
+
 # Clean old config files
 log "   Cleaning old config files..."
 cd "$BACKUP_ROOT/config" && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm --
 pass "   Old config files cleaned"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. BACKUP SUMMARY
+# 7. BACKUP SUMMARY
 # ─────────────────────────────────────────────────────────────────────────────
-log "6. Generating backup summary..."
+log "7. Generating backup summary..."
 
 BACKUP_SIZE=$(du -sh "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}" 2>/dev/null | cut -f1)
 TOTAL_BACKUP_SIZE=$(du -sh "$BACKUP_ROOT" 2>/dev/null | cut -f1)
 
 cat > "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt" <<EOF
 ========================================================
-  ZIMBRA BACKUP SUMMARY (v1.4 - WORKING)
+  ZIMBRA BACKUP SUMMARY (v1.7 - FIXED)
 ========================================================
 Backup Date:    $BACKUP_DATE
 Server:         $SERVER_NAME
@@ -255,27 +291,36 @@ Total Size:     $TOTAL_BACKUP_SIZE
 Domains:        $DOMAIN_COUNT
 Accounts:       $ACCOUNT_COUNT
 Dist. Lists:    $DL_COUNT
-Success:        $BACKUP_SUCCESS
-Failed:         $BACKUP_FAILED
+Password Hash : $PASSWORD_BACKUP_COUNT
+Mailbox Success: $BACKUP_SUCCESS
+Mailbox Failed:  $BACKUP_FAILED
 ========================================================
 
-Backup Location: $BACKUP_ROOT
-Log File: $LOG_FILE
+BACKUP INCLUDES:
+✅ Global Configuration
+✅ Server Configuration
+✅ Local Configuration
+✅ All Accounts List
+✅ All Distribution Lists
+✅ Password Hashes (per account, .shadow files)
+✅ Mailboxes (TGZ via zmmailbox)
+✅ User Preferences, Filters, Signatures
 
-Config Commands Used:
-- zmprov gacf (global config)
-- zmprov gs $SERVER_NAME (server config)
-- zmlocalconfig -m (local config)
-- zmprov -l gaa (all accounts)
-- zmprov gad (all domains)
+⚠️  SECURITY WARNING - PASSWORD FILES:
+🔒 Location: $BACKUP_ROOT/passwords/${BACKUP_DATE}/
+🔒 Permission: 700 (zimbra:zimbra only)
+🔒 DO NOT share these files!
+🔒 DO NOT commit to version control!
 
 ========================================================
   RESTORE INSTRUCTIONS
 ========================================================
 1. Stop Zimbra: su - zimbra -c "zmcontrol stop"
-2. Run restore script: bash zimbra-restore.sh $BACKUP_DATE
-3. Start Zimbra: su - zimbra -c "zmcontrol start"
-4. Verify: bash zimbra-verify-backup.sh $BACKUP_DATE
+2. Restore config: bash zimbra-restore-config.sh $BACKUP_DATE
+3. Restore passwords: bash zimbra-restore-passwords.sh $BACKUP_DATE
+4. Restore mailboxes: bash zimbra-restore-mailboxes.sh $BACKUP_DATE
+5. Start Zimbra: su - zimbra -c "zmcontrol start"
+6. Verify: bash zimbra-verify-backup.sh $BACKUP_DATE
 ========================================================
 EOF
 
@@ -295,17 +340,21 @@ echo -e "Total Size    : $TOTAL_BACKUP_SIZE"
 echo -e "Domains       : $DOMAIN_COUNT"
 echo -e "Accounts      : $ACCOUNT_COUNT"
 echo -e "Dist. Lists   : $DL_COUNT"
-echo -e "Success       : $BACKUP_SUCCESS"
-echo -e "Failed        : $BACKUP_FAILED"
+echo -e "Password Hash : $PASSWORD_BACKUP_COUNT"
+echo -e "Mailbox Success: $BACKUP_SUCCESS"
+echo -e "Mailbox Failed : $BACKUP_FAILED"
 echo -e "Retention     : $RETENTION_DAYS days"
 echo -e "Backup Root   : $BACKUP_ROOT"
 echo -e "Log File      : $LOG_FILE"
 echo -e "${GREEN}========================================================${NC}"
+echo -e "${YELLOW}⚠️  SECURITY WARNING:${NC}"
+echo -e "Password hashes saved in: $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
+echo -e "Permission: 700 (zimbra:zimbra only)"
 echo -e "${YELLOW}Next Steps:${NC}"
 echo -e "1. Review log file: cat $LOG_FILE"
-echo -e "2. Verify backup: bash zimbra-verify-backup.sh $BACKUP_DATE"
-echo -e "3. Setup cron for automated backup"
-echo -e "4. Test restore procedure periodically"
+echo -e "2. Verify password files: ls -la $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
+echo -e "3. Verify backup: bash zimbra-verify-backup.sh $BACKUP_DATE"
+echo -e "4. Test restore procedure (see zimbra-restore-*.sh scripts)"
 echo -e "${GREEN}========================================================${NC}\n"
 
 cp "$LOG_FILE" "$BACKUP_ROOT/logs/"
