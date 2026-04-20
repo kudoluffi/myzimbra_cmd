@@ -36,6 +36,14 @@ Backup mencakup:
 | **Comprehensive Logging** | Semua proses tercatat di log file |
 
 ---
+## 🔍 Related Scripts
+
+- **[zimbra-verify-backup.md](zimbra-verify-backup.md)** - Verify backup integrity with Telegram notification
+- **zimbra-restore-config.sh** - Restore Zimbra configuration (Coming Soon)
+- **zimbra-restore-passwords.sh** - Restore password hashes (Coming Soon)
+- **zimbra-restore-mailboxes.sh** - Restore user mailboxes (Coming Soon)
+
+---
 
 ## 📥 Instalasi
 
