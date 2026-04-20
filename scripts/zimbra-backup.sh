@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-backup.sh v1.9
-# OPTIMIZED - Removed redundant filter/signature backup (already in preferences)
+# zimbra-backup.sh v2.0
+# FIXED: Correct distribution list backup (zmprov gadl + gdlm)
 # Usage: sudo bash zimbra-backup.sh [full|incremental]
 
 set -u
@@ -65,7 +65,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Backup Script (v1.9 - OPTIMIZED)${NC}"
+echo -e "${GREEN}  Zimbra Backup Script (v2.0 - FIXED DL)${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup Date: $BACKUP_DATE"
@@ -118,10 +118,11 @@ su - $ZIMBRA_USER -c "zmcontrol -v > $BACKUP_ROOT/config/zimbra-version-${BACKUP
 pass "   Version info saved"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. ACCOUNTS & DISTRIBUTION LISTS
+# 2. ACCOUNTS & DISTRIBUTION LISTS (FIXED!)
 # ─────────────────────────────────────────────────────────────────────────────
 log "2. Backing up accounts and distribution lists..."
 
+# All domains
 log "   Exporting domain list..."
 su - $ZIMBRA_USER -c "zmprov gad > $BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt" 2>&1
 if [ -s "$BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt" ]; then
@@ -132,6 +133,7 @@ else
   DOMAIN_COUNT=0
 fi
 
+# All accounts (USE -l FLAG!)
 log "   Exporting account list (zmprov -l gaa)..."
 su - $ZIMBRA_USER -c "zmprov -l gaa > $BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt" 2>&1
 
@@ -149,12 +151,44 @@ else
   ACCOUNT_COUNT=0
 fi
 
-log "   Exporting distribution lists..."
-su - $ZIMBRA_USER -c "zmprov -l gad -t distributionlist > $BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt" 2>&1
-if [ -s "$BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt" ]; then
-  DL_COUNT=$(wc -l < "$BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt")
+# ─────────────────────────────────────────────────────────────────────────────
+# DISTRIBUTION LISTS (FIXED: Use gadl + gdlm)
+# ─────────────────────────────────────────────────────────────────────────────
+log "   Exporting distribution lists (zmprov gadl)..."
+
+DL_LIST_FILE="$BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt"
+su - $ZIMBRA_USER -c "zmprov gadl > '$DL_LIST_FILE'" 2>&1
+
+if [ -s "$DL_LIST_FILE" ]; then
+  DL_COUNT=$(wc -l < "$DL_LIST_FILE")
   pass "   Found $DL_COUNT distribution list(s)"
+  
+  # Export members for EACH distribution list
+  log "   Exporting distribution list members..."
+  DL_MEMBER_COUNT=0
+  
+  while IFS= read -r dl_email; do
+    if [ -n "$dl_email" ] && echo "$dl_email" | grep -q "@"; then
+      # Create safe filename from DL email
+      DL_SAFE_NAME=$(echo "$dl_email" | tr '@' '_' | tr '.' '_')
+      DL_MEMBER_FILE="$BACKUP_ROOT/distribution-lists/dl-members-${DL_SAFE_NAME}-${BACKUP_DATE}.txt"
+      
+      # Export members using gdlm (Get Distribution List Members)
+      su - $ZIMBRA_USER -c "zmprov gdlm '$dl_email' > '$DL_MEMBER_FILE'" 2>&1
+      
+      if [ -s "$DL_MEMBER_FILE" ]; then
+        MEMBER_COUNT=$(grep -c "@" "$DL_MEMBER_FILE" 2>/dev/null || echo "0")
+        log "     ✓ $dl_email ($MEMBER_COUNT members)"
+        DL_MEMBER_COUNT=$((DL_MEMBER_COUNT + MEMBER_COUNT))
+      else
+        warn "     ⚠ $dl_email (no members or export failed)"
+      fi
+    fi
+  done < "$DL_LIST_FILE"
+  
+  pass "   Distribution list members exported: $DL_MEMBER_COUNT total members"
 else
+  warn "   No distribution lists found"
   DL_COUNT=0
 fi
 
@@ -250,7 +284,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. USER PREFERENCES (OPTIMIZED - No separate filter/signature backup)
+# 5. USER PREFERENCES
 # ─────────────────────────────────────────────────────────────────────────────
 log "5. Backing up user preferences (includes signatures & filters)..."
 
@@ -263,7 +297,6 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
       fi
       ACCOUNT_NAME=$(echo "$account" | cut -d@ -f1)
       
-      # Single command - includes ALL user settings (signatures, filters, etc)
       su - $ZIMBRA_USER -c "zmprov ga '$account' > '$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-preferences.txt'" 2>/dev/null
       
       if [ -s "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-preferences.txt" ]; then
@@ -314,7 +347,7 @@ TOTAL_BACKUP_SIZE=$(du -sh "$BACKUP_ROOT" 2>/dev/null | cut -f1)
 
 cat > "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt" <<EOF
 ========================================================
-  ZIMBRA BACKUP SUMMARY (v1.9 - OPTIMIZED)
+  ZIMBRA BACKUP SUMMARY (v2.0 - FIXED DL)
 ========================================================
 Backup Date:    $BACKUP_DATE
 Server:         $SERVER_NAME
@@ -325,6 +358,7 @@ Total Size:     $TOTAL_BACKUP_SIZE
 Domains:        $DOMAIN_COUNT
 Accounts:       $ACCOUNT_COUNT
 Dist. Lists:    $DL_COUNT
+DL Members:     $DL_MEMBER_COUNT
 Password Hash : $PASSWORD_BACKUP_COUNT
 Mailbox Success: $BACKUP_SUCCESS
 Mailbox Failed : $BACKUP_FAILED
@@ -337,8 +371,10 @@ BACKUP INCLUDES:
 ✅ Server Configuration (zmprov gs)
 ✅ Local Configuration (zmlocalconfig)
 ✅ All Accounts List (zmprov -l gaa)
-✅ All Distribution Lists (zmprov gad -t distributionlist)
-✅ Password Hashes (user accounts only, .shadow files)
+✅ All Domains (zmprov gad)
+✅ All Distribution Lists (zmprov gadl)
+✅ DL Members per list (zmprov gdlm)
+✅ Password Hashes (user accounts only)
 ✅ Mailboxes (user accounts only, TGZ via zmmailbox)
 ✅ User Preferences (includes signatures & filters)
 
@@ -360,18 +396,19 @@ EXCLUDED SYSTEM ACCOUNTS:
 ℹ️  NOTE: User preferences.txt includes:
    - Signatures (zimbraPrefSignature)
    - Filters/Forwarding (zimbraPrefMailForwardingAddress)
+   - Account status (zimbraAccountStatus)
    - All other user settings
-   No separate backup needed for filters/signatures
 
 ========================================================
   RESTORE INSTRUCTIONS
 ========================================================
 1. Stop Zimbra: su - zimbra -c "zmcontrol stop"
-2. Restore config: bash zimbra-restore-config.sh $BACKUP_DATE
-3. Restore passwords: bash zimbra-restore-passwords.sh $BACKUP_DATE
-4. Restore mailboxes: bash zimbra-restore-mailboxes.sh $BACKUP_DATE
-5. Start Zimbra: su - zimbra -c "zmcontrol start"
-6. Verify: bash zimbra-verify-backup.sh $BACKUP_DATE
+2. Restore config: bash zimbra-restore.sh --config $BACKUP_DATE
+3. Restore passwords: bash zimbra-restore.sh --passwords $BACKUP_DATE
+4. Restore mailboxes: bash zimbra-restore.sh --mailboxes $BACKUP_DATE
+5. Restore distribution lists: See docs/zimbra-restore.md
+6. Start Zimbra: su - zimbra -c "zmcontrol start"
+7. Verify: bash zimbra-verify-backup.sh $BACKUP_DATE
 ========================================================
 EOF
 
@@ -391,6 +428,7 @@ echo -e "Total Size    : $TOTAL_BACKUP_SIZE"
 echo -e "Domains       : $DOMAIN_COUNT"
 echo -e "Accounts      : $ACCOUNT_COUNT"
 echo -e "Dist. Lists   : $DL_COUNT"
+echo -e "DL Members    : $DL_MEMBER_COUNT"
 echo -e "Password Hash : $PASSWORD_BACKUP_COUNT"
 echo -e "Mailbox Success: $BACKUP_SUCCESS"
 echo -e "Mailbox Failed : $BACKUP_FAILED"
@@ -405,10 +443,10 @@ echo -e "Password hashes saved in: $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
 echo -e "Permission: 700 (zimbra:zimbra only)"
 echo -e "${YELLOW}Next Steps:${NC}"
 echo -e "1. Review log file: cat $LOG_FILE"
-echo -e "2. Verify password files: ls -la $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
-echo -e "3. Verify backup: bash zimbra-verify-backup.sh $BACKUP_DATE"
-echo -e "4. Setup cron for automated backup"
-echo -e "5. Test restore procedure periodically"
+echo -e "2. Verify DL backup: cat $BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt"
+echo -e "3. Verify password files: ls -la $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
+echo -e "4. Verify backup: bash zimbra-verify-backup.sh $BACKUP_DATE"
+echo -e "5. Setup cron for automated backup"
 echo -e "${GREEN}========================================================${NC}\n"
 
 cp "$LOG_FILE" "$BACKUP_ROOT/logs/"
