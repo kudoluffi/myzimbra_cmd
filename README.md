@@ -18,6 +18,7 @@ Kumpulan script otomatisasi untuk instalasi, konfigurasi, dan maintenance **Zimb
 | [`zimbra-dkim-setup.sh`](scripts/zimbra-dkim-stup.sh) | [`zimbra-dkim-setup.md`](docs/zimbra-dkim-setup.md) | Setup DKIM, SPF, DMARC untuk email authentication | ✅ Stable v1.6 |
 | [`zimbra-verify-ssl.sh`](scripts/zimbra-verify-ssl.sh) | [`zimbra-dkim-setup.md`](docs/zimbra-verify-ssl.md) | Verifikasi SSL deployment di semua layanan Zimbra | ✅ Stable v1.1 |
 | [`zimbra-backup.sh`](scripts/zimbra-backup.sh) | [`zimbra-backup.md`](docs/zimbra-backup.md) | Automated backup (weekly full + daily incremental) dengan retention policy | ✅ Stable v1.9 |
+| [`zimbra-verify-backup.sh`](scripts/zimbra-verify-backup.sh) | [`zimbra-verify-backup.md`](docs/zimbra-verify-backup.md) | Verifikasi backup integrity dengan Telegram notification | ✅ Stable v1.1 |
 | _zimbra_migration.sh_ | | Migrasi Zimbra ke server baru (Coming Soon) | 🚧 Development |
 
 ---
