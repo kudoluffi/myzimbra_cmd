@@ -45,6 +45,19 @@ Backup mencakup:
 
 ---
 
+## 📱 Telegram Notification
+
+Untuk menerima notifikasi Telegram saat verification FAILED atau WARNING, setup [`zimbra-verify-backup.sh`](zimbra-verify-backup.md) dengan Telegram bot.
+
+**Quick Setup:**
+```bash
+# 1. Create bot via @BotFather
+# 2. Get Chat ID via @userinfobot
+# 3. Add to crontab:
+0 4 * * * /root/zimbra-verify-backup.sh
+```
+---
+
 ## 📥 Instalasi
 
 ### 1. Download Script
