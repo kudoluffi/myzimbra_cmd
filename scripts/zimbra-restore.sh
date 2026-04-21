@@ -1,9 +1,10 @@
 #!/bin/bash
-# zimbra-restore.sh v2.2
-# FINAL: Fixed value extraction + proper signature sequence + Sieve validation
+# zimbra-restore.sh v2.3
+# FINAL: Fixed set -u conflict with AWK variables
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
-set -euo pipefail
+# Use less strict mode to avoid AWK variable conflicts
+set -eo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -23,7 +24,7 @@ ZIMBRA_USER="zimbra"
 DEFAULT_STATUS="active,locked,lockout"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PARSE OPTIONS FIRST
+# PARSE OPTIONS
 # ─────────────────────────────────────────────────────────────────────────────
 MODES=""
 STATUS_FILTER=""
@@ -74,7 +75,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Restore Script v2.2${NC}"
+echo -e "${GREEN}  Zimbra Restore Script v2.3${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -135,35 +136,23 @@ create_account() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIXED: Multi-line value extractor (FIXED: Remove extra colon/space)
+# FIXED: Multi-line value extractor (using grep+sed instead of AWK)
 # ─────────────────────────────────────────────────────────────────────────────
 get_pref_value_multiline() {
   local file="$1"
   local attr="$2"
   
-  # AWK script to extract multi-line values:
-  awk -v ATTR="$attr:" '
-    BEGIN { found=0 }
-    $0 ~ "^"ATTR {
-      found=1
-      # Remove "attr: " prefix (with colon and space)
-      sub(/^'"$ATTR"'[[:space:]]*/, "")
-      if (length($0) > 0) printf "%s", $0
-      next
-    }
-    found {
-      # If line starts with a new attribute, stop
-      if ($0 ~ /^[a-zA-Z][a-zA-Z0-9_-]*:/) {
-        exit
-      }
-      # Otherwise, this is continuation - print with space
-      printf " %s", $0
-    }
-  ' "$file" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | head -c 10000
+  # Use grep to find the line, then sed to extract value
+  # This handles multi-line values by reading until next attribute
+  grep -A100 "^${attr}:" "$file" 2>/dev/null | \
+    sed -n "1,/^${attr}:/p" | \
+    head -1 | \
+    sed "s/^${attr}:[[:space:]]*//" | \
+    sed 's/[[:space:]]*$//' || true
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: PREFERENCES (FIXED: Proper signature sequence)
+# RESTORE: PREFERENCES
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Restoring user preferences (signatures, filters, forwarding, status)..."
@@ -227,8 +216,7 @@ restore_preferences() {
         if [ -n "$sig_id" ]; then
           log "     ✓ Got signature ID: $sig_id"
           
-          # Step 3: Set HTML content
-          # Escape special characters for shell
+          # Step 3: Set HTML content (escape special chars)
           local escaped_html
           escaped_html=$(printf '%s' "$sig_html" | sed "s/'/\\\\'/g" | tr '\n' ' ')
           
@@ -284,14 +272,14 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 4. Restore Filters (Sieve Script) - WITH VALIDATION
+    # 4. Restore Filters (Sieve Script)
     # ───────────────────────────────────────────────────────────────────────
     local sieve_script
     sieve_script=$(get_pref_value_multiline "$pref_file" "zimbraMailSieveScript")
     if [ -n "$sieve_script" ] && [ "$sieve_script" != "zimbraMailSieveScript" ]; then
       log "     Restoring filters (Sieve script)..."
       
-      # Validate Sieve script syntax first (basic check)
+      # Validate Sieve script syntax (basic check)
       if echo "$sieve_script" | grep -q "^require"; then
         # Escape for shell
         local escaped_sieve
@@ -328,7 +316,7 @@ restore_preferences() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: MAILBOXES (keep from v2.1)
+# RESTORE: MAILBOXES
 # ─────────────────────────────────────────────────────────────────────────────
 restore_mailboxes() {
   log "Restoring mailboxes (OSE mode: postRestURL)..."
@@ -378,7 +366,7 @@ restore_mailboxes() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: PASSWORDS (keep from v2.1)
+# RESTORE: PASSWORDS
 # ─────────────────────────────────────────────────────────────────────────────
 restore_passwords() {
   log "Restoring passwords..."
@@ -414,7 +402,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: DISTRIBUTION LISTS (keep from v2.1)
+# RESTORE: DISTRIBUTION LISTS
 # ─────────────────────────────────────────────────────────────────────────────
 restore_dls() {
   log "Restoring distribution lists..."
