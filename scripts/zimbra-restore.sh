@@ -1,9 +1,9 @@
 #!/bin/bash
-# zimbra-restore.sh v2.3
-# FINAL: Fixed set -u conflict with AWK variables
+# zimbra-restore.sh v2.4
+# FINAL: Added timeout + better error handling for hanging zmprov commands
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
-# Use less strict mode to avoid AWK variable conflicts
+# Less strict mode to avoid premature exit
 set -eo pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -22,6 +22,7 @@ err()  { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 BACKUP_ROOT="/backup/zimbra"
 ZIMBRA_USER="zimbra"
 DEFAULT_STATUS="active,locked,lockout"
+ZMPROV_TIMEOUT=30  # Timeout for zmprov commands (seconds)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PARSE OPTIONS
@@ -75,7 +76,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Restore Script v2.3${NC}"
+echo -e "${GREEN}  Zimbra Restore Script v2.4${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -126,29 +127,47 @@ should_restore() {
 }
 
 account_exists() {
-  su - "$ZIMBRA_USER" -c "zmprov ga '$1' &>/dev/null" 2>/dev/null || return 1
+  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ga '$1' &>/dev/null" 2>/dev/null || return 1
 }
 
 create_account() {
   local acc="$1" pwd="$2"
   log "   Creating: $acc"
-  su - "$ZIMBRA_USER" -c "zmprov ca '$acc' '$pwd'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null || return 1
+  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ca '$acc' '$pwd'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null || return 1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIXED: Multi-line value extractor (using grep+sed instead of AWK)
+# Value extractor (simple grep+sed)
 # ─────────────────────────────────────────────────────────────────────────────
 get_pref_value_multiline() {
   local file="$1"
   local attr="$2"
   
-  # Use grep to find the line, then sed to extract value
-  # This handles multi-line values by reading until next attribute
-  grep -A100 "^${attr}:" "$file" 2>/dev/null | \
-    sed -n "1,/^${attr}:/p" | \
-    head -1 | \
-    sed "s/^${attr}:[[:space:]]*//" | \
-    sed 's/[[:space:]]*$//' || true
+  # Find the attribute line and extract value after colon
+  grep "^${attr}:" "$file" 2>/dev/null | head -1 | sed "s/^${attr}:[[:space:]]*//" | sed 's/[[:space:]]*$//' || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Get attribute with timeout
+# ─────────────────────────────────────────────────────────────────────────────
+get_zimbra_attr() {
+  local acc="$1"
+  local attr="$2"
+  
+  # Use timeout to prevent hanging
+  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ga '$acc' '$attr'" 2>/dev/null | \
+    grep "^${attr}:" | awk '{print $2}' | head -1 || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Set attribute with timeout
+# ─────────────────────────────────────────────────────────────────────────────
+set_zimbra_attr() {
+  local acc="$1"
+  local attr="$2"
+  local value="$3"
+  
+  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$attr' '$value'" 2>/dev/null || return 1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -186,7 +205,7 @@ restore_preferences() {
     value=$(get_pref_value_multiline "$pref_file" "zimbraAccountStatus")
     if [ -n "$value" ] && [ "$value" != "zimbraAccountStatus" ]; then
       log "     Setting zimbraAccountStatus: $value"
-      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraAccountStatus '$value'" 2>/dev/null; then
+      if set_zimbra_attr "$acc" "zimbraAccountStatus" "$value"; then
         applied=$((applied+1))
         log "     ✓ Applied zimbraAccountStatus"
       else
@@ -206,26 +225,29 @@ restore_preferences() {
       log "     Restoring signature: $sig_name"
       
       # Step 1: Set signature name
-      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraSignatureName '$sig_name'" 2>/dev/null; then
+      if set_zimbra_attr "$acc" "zimbraSignatureName" "$sig_name"; then
         log "     ✓ Set signature name"
         
-        # Step 2: Get signature ID (auto-generated)
+        # Small delay to let Zimbra index the new signature
+        sleep 1
+        
+        # Step 2: Get signature ID (with timeout)
         local sig_id
-        sig_id=$(su - "$ZIMBRA_USER" -c "zmprov ga '$acc' zimbraSignatureId" 2>/dev/null | grep "zimbraSignatureId:" | awk '{print $2}' | head -1)
+        sig_id=$(get_zimbra_attr "$acc" "zimbraSignatureId")
         
         if [ -n "$sig_id" ]; then
           log "     ✓ Got signature ID: $sig_id"
           
           # Step 3: Set HTML content (escape special chars)
           local escaped_html
-          escaped_html=$(printf '%s' "$sig_html" | sed "s/'/\\\\'/g" | tr '\n' ' ')
+          escaped_html=$(printf '%s' "$sig_html" | sed "s/'/\\\\'/g" | tr '\n' ' ' | head -c 5000)
           
-          if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraPrefMailSignatureHTML '$escaped_html'" 2>/dev/null; then
+          if set_zimbra_attr "$acc" "zimbraPrefMailSignatureHTML" "$escaped_html"; then
             log "     ✓ Set signature HTML"
             applied=$((applied+1))
             
             # Step 4: Set default signature ID
-            if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraPrefDefaultSignatureId '$sig_id'" 2>/dev/null; then
+            if set_zimbra_attr "$acc" "zimbraPrefDefaultSignatureId" "$sig_id"; then
               log "     ✓ Set default signature ID"
               applied=$((applied+1))
             else
@@ -233,7 +255,7 @@ restore_preferences() {
             fi
             
             # Step 5: Set forward/reply signature ID
-            if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraPrefForwardReplySignatureId '$sig_id'" 2>/dev/null; then
+            if set_zimbra_attr "$acc" "zimbraPrefForwardReplySignatureId" "$sig_id"; then
               log "     ✓ Set forward/reply signature ID"
               applied=$((applied+1))
             else
@@ -244,7 +266,17 @@ restore_preferences() {
             failed_list="${failed_list}signature,"
           fi
         else
-          log "     ✗ Could not get signature ID"
+          log "     ✗ Could not get signature ID (timeout or not found)"
+          # Fallback: try to use the ID from backup if available
+          local backup_sig_id
+          backup_sig_id=$(get_pref_value_multiline "$pref_file" "zimbraPrefDefaultSignatureId")
+          if [ -n "$backup_sig_id" ] && [ "$backup_sig_id" != "zimbraPrefDefaultSignatureId" ]; then
+            log "     ⚠ Using backup signature ID: $backup_sig_id"
+            if set_zimbra_attr "$acc" "zimbraPrefDefaultSignatureId" "$backup_sig_id"; then
+              applied=$((applied+1))
+              log "     ✓ Set default signature ID from backup"
+            fi
+          fi
           failed_list="${failed_list}signature_id,"
         fi
       else
@@ -262,7 +294,7 @@ restore_preferences() {
     fwd_addr=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailForwardingAddress")
     if [ -n "$fwd_addr" ] && [ "$fwd_addr" != "zimbraPrefMailForwardingAddress" ]; then
       log "     Setting forwarding: $fwd_addr"
-      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraPrefMailForwardingAddress '$fwd_addr'" 2>/dev/null; then
+      if set_zimbra_attr "$acc" "zimbraPrefMailForwardingAddress" "$fwd_addr"; then
         applied=$((applied+1))
         log "     ✓ Applied forwarding"
       else
@@ -283,14 +315,14 @@ restore_preferences() {
       if echo "$sieve_script" | grep -q "^require"; then
         # Escape for shell
         local escaped_sieve
-        escaped_sieve=$(printf '%s' "$sieve_script" | sed "s/'/\\\\'/g")
+        escaped_sieve=$(printf '%s' "$sieve_script" | sed "s/'/\\\\'/g" | head -c 10000)
         
-        # Try to apply
-        if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraMailSieveScript '$escaped_sieve'" 2>/dev/null; then
+        # Try to apply with timeout
+        if timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraMailSieveScript '$escaped_sieve'" 2>/dev/null; then
           applied=$((applied+1))
           log "     ✓ Applied Sieve script"
         else
-          log "     ✗ Failed to apply Sieve script (syntax error?)"
+          log "     ✗ Failed to apply Sieve script (syntax error or timeout)"
           log "     ⚠ Skipping filters to avoid breaking account"
           failed_list="${failed_list}filters,"
         fi
@@ -352,7 +384,7 @@ restore_mailboxes() {
     log "   Restoring mailbox: $acc"
     
     local restore_output
-    restore_output=$(su - "$ZIMBRA_USER" -c "zmmailbox -z -m '$acc' postRestURL '/?fmt=tgz&resolve=skip' '$f'" 2>&1) || true
+    restore_output=$(timeout 120 su - "$ZIMBRA_USER" -c "zmmailbox -z -m '$acc' postRestURL '/?fmt=tgz&resolve=skip' '$f'" 2>&1) || true
     echo "$restore_output" >> /tmp/zimbra-restore.log
     
     if echo "$restore_output" | grep -qi "usage:\|error\|exception\|fail"; then
@@ -391,7 +423,7 @@ restore_passwords() {
     hash=$(cat "$f")
     if [ -n "$hash" ]; then
       log "   Setting password: $acc"
-      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' userPassword '$hash'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null; then
+      if timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' userPassword '$hash'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null; then
         ok=$((ok+1)); pass "      ✓ $acc"
       else
         fail=$((fail+1)); fail "      ✗ $acc"
@@ -420,7 +452,7 @@ restore_dls() {
   while IFS= read -r dl; do
     [ -z "$dl" ] && continue
     log "   Restoring DL: $dl"
-    su - "$ZIMBRA_USER" -c "zmprov cdl '$dl'" 2>/dev/null || true
+    timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov cdl '$dl'" 2>/dev/null || true
     
     local dl_safe
     dl_safe=$(echo "$dl" | tr '@' '_' | tr '.' '_')
@@ -435,7 +467,7 @@ restore_dls() {
         echo "$member" | grep -qE "^[^@]+@[^@]+\.[^@]+$" || continue
         
         if account_exists "$member"; then
-          su - "$ZIMBRA_USER" -c "zmprov adlm '$dl' '$member'" 2>/dev/null && m_ok=$((m_ok+1))
+          timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov adlm '$dl' '$member'" 2>/dev/null && m_ok=$((m_ok+1))
         else
           log "      ⚠ Member not found: $member"
         fi
