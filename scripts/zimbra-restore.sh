@@ -1,9 +1,10 @@
 #!/bin/bash
-# zimbra-restore.sh v3.14
-# FINAL: Fixed Signature ID extraction using grep
+# zimbra-restore.sh v3.15
+# FINAL: Fixed hanging on Signature ID extraction + robust error handling
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
-set -eo pipefail
+# Remove set -e to prevent premature exit on minor issues
+set -o pipefail
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
@@ -72,7 +73,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.14${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.15${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -265,7 +266,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3: RESTORE PREFERENCES (FIXED: Signature ID Extraction)
+# STEP 3: RESTORE PREFERENCES (FIXED: No hanging on Signature ID)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Step 3: Restoring preferences..."
@@ -326,10 +327,14 @@ restore_preferences() {
     if [ "$signature_restored" = "true" ]; then
       log "     Getting auto-generated Signature ID..."
       
-      # Run zmprov ga to get zimbraSignatureId
-      # Use grep to find the line, then sed to extract value
+      # FIXED: Use timeout and capture output safely
+      # Run as zimbra user, capture output, extract ID
+      local firmaid_output
+      firmaid_output=$(timeout 10 su - "$ZIMBRA_USER" -c "zmprov ga '$acc' zimbraSignatureId" 2>&1) || true
+      
+      # Extract ID using grep and sed
       local firmaid
-      firmaid=$(su - "$ZIMBRA_USER" -c "zmprov ga '$acc' zimbraSignatureId" 2>/dev/null | grep "zimbraSignatureId:" | sed "s/zimbraSignatureId:[[:space:]]*//")
+      firmaid=$(echo "$firmaid_output" | grep "zimbraSignatureId:" | sed "s/zimbraSignatureId:[[:space:]]*//")
       
       if [ -n "$firmaid" ]; then
         log "     ✓ Got new Signature ID: $firmaid"
@@ -353,6 +358,7 @@ restore_preferences() {
         fi
       else
         log "     ✗ Could not extract Signature ID"
+        log "     Debug Output: $firmaid_output"
         failed_list="${failed_list}sig_id_extract,"
       fi
     fi
