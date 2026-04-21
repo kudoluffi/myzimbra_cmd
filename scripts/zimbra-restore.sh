@@ -1,5 +1,5 @@
 #!/bin/bash
-# zimbra-restore.sh v3.10.1
+# zimbra-restore.sh v3.10.2
 # FINAL: Simple file-based approach (like v3.4) + restore signature name
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
@@ -163,6 +163,26 @@ set_zimbra_attr() {
   local attr="$2"
   local value="$3"
   timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$attr' '$value'" 2>/dev/null
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIXED: SET HTML/SIEVE FROM FILE USING BASE64 (NO ESCAPING NEEDED!)
+# ─────────────────────────────────────────────────────────────────────────────
+set_zimbra_attr_base64() {
+  local acc="$1"
+  local attr="$2"
+  local temp_file="$3"
+  
+  # Encode file content to base64 (safe for shell)
+  local encoded
+  encoded=$(base64 -w 0 "$temp_file")
+  
+  # Decode and apply as zimbra user
+  su - "$ZIMBRA_USER" -c "echo '$encoded' | base64 -d | xargs -0 printf '%s' | xargs -I {} zmprov ma '$acc' '$attr' '{}'" 2>/dev/null
+  local result=$?
+  
+  rm -f "$temp_file"
+  return $result
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
