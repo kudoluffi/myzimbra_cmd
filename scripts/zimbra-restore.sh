@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v3.9
-# FINAL: Signature HTML - use base64 encoding to bypass ALL escaping issues
+# zimbra-restore.sh v3.10
+# FINAL: Simple file-based approach (like v3.4) + restore signature name
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -72,7 +72,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.9${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.10${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -166,19 +166,19 @@ set_zimbra_attr() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIXED: SET HTML/SIEVE FROM FILE USING BASE64 (NO ESCAPING NEEDED!)
+# SET ATTRIBUTE FROM FILE (V3.4 APPROACH - WORKS!)
 # ─────────────────────────────────────────────────────────────────────────────
-set_zimbra_attr_base64() {
+set_zimbra_attr_from_file() {
   local acc="$1"
   local attr="$2"
   local temp_file="$3"
   
-  # Encode file content to base64 (safe for shell)
-  local encoded
-  encoded=$(base64 -w 0 "$temp_file")
+  # Read content from file
+  local content
+  content=$(cat "$temp_file")
   
-  # Decode and apply as zimbra user
-  su - "$ZIMBRA_USER" -c "echo '$encoded' | base64 -d | xargs -0 printf '%s' | xargs -I {} zmprov ma '$acc' '$attr' '{}'" 2>/dev/null
+  # Apply using zmprov
+  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$attr' '$content'" 2>/dev/null
   local result=$?
   
   rm -f "$temp_file"
@@ -249,7 +249,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3: RESTORE PREFERENCES
+# STEP 3: RESTORE PREFERENCES (FIXED: Signature name + file approach)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Step 3: Restoring preferences..."
@@ -270,7 +270,24 @@ restore_preferences() {
     local failed_list=""
     
     # ───────────────────────────────────────────────────────────────────────
-    # 1. Signature HTML (BASE64 approach)
+    # 1. Signature Name (ADDED BACK!)
+    # ───────────────────────────────────────────────────────────────────────
+    local sig_name
+    sig_name=$(get_pref_value "$pref_file" "zimbraSignatureName")
+    
+    if [ -n "$sig_name" ] && [ "$sig_name" != "zimbraSignatureName" ]; then
+      log "     Setting signature name: $sig_name"
+      if set_zimbra_attr "$acc" "zimbraSignatureName" "$sig_name"; then
+        log "     ✓ Set signature name"
+        applied=$((applied+1))
+      else
+        log "     ✗ Failed to set signature name"
+        failed_list="${failed_list}signature_name,"
+      fi
+    fi
+    
+    # ───────────────────────────────────────────────────────────────────────
+    # 2. Signature HTML (FILE approach - V3.4)
     # ───────────────────────────────────────────────────────────────────────
     local sig_html
     sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML" "zimbraPrefMailSignatureStyle" "false")
@@ -279,21 +296,19 @@ restore_preferences() {
       log "     Setting signature HTML (${#sig_html} chars)"
       local temp_html="/tmp/sig_${fn}.html"
       
-      # Write HTML to temp file
       printf '%s' "$sig_html" > "$temp_html"
       
-      # Use base64 to avoid ALL escaping issues
-      if set_zimbra_attr_base64 "$acc" "zimbraPrefMailSignatureHTML" "$temp_html"; then
+      if set_zimbra_attr_from_file "$acc" "zimbraPrefMailSignatureHTML" "$temp_html"; then
         log "     ✓ Set signature HTML"
         applied=$((applied+1))
       else
         log "     ✗ Failed to set signature HTML"
-        failed_list="${failed_list}signature,"
+        failed_list="${failed_list}signature_html,"
       fi
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 2. Forwarding
+    # 3. Forwarding
     # ───────────────────────────────────────────────────────────────────────
     local fwd_addr=$(get_pref_value "$pref_file" "zimbraPrefMailForwardingAddress")
     if [ -n "$fwd_addr" ] && [ "$fwd_addr" != "zimbraPrefMailForwardingAddress" ]; then
@@ -302,7 +317,7 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 3. Filters (BASE64 approach - same as signature)
+    # 4. Filters (FILE approach - V3.4 - ALREADY WORKING)
     # ───────────────────────────────────────────────────────────────────────
     local sieve_script
     sieve_script=$(get_pref_value_multiline "$pref_file" "zimbraMailSieveScript" "zimbraMailSieveScriptMaxSize" "true")
@@ -313,7 +328,7 @@ restore_preferences() {
       
       printf '%s' "$sieve_script" > "$temp_sieve"
       
-      if set_zimbra_attr_base64 "$acc" "zimbraMailSieveScript" "$temp_sieve"; then
+      if set_zimbra_attr_from_file "$acc" "zimbraMailSieveScript" "$temp_sieve"; then
         log "     ✓ Applied Sieve script"
         applied=$((applied+1))
       else
@@ -427,6 +442,7 @@ echo -e "${GREEN}  RESTORE COMPLETED${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 echo -e "Log: /tmp/zimbra-restore.log" >&2
 echo -e "${YELLOW}Verify:${NC}" >&2
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraSignatureName'" >&2
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML'" >&2
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraMailSieveScript' | head -5" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
