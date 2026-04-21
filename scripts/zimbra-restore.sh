@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v2.0
-# FINAL: Fixed postRestURL syntax + AWK variable issue + simpler preferences
+# zimbra-restore.sh v2.1
+# FINAL: Fixed multi-line preference value extraction
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -euo pipefail
@@ -74,7 +74,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Restore Script v2.0${NC}"
+echo -e "${GREEN}  Zimbra Restore Script v2.1${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -134,12 +134,37 @@ create_account() {
   su - "$ZIMBRA_USER" -c "zmprov ca '$acc' '$pwd'" 2>&1 | tee -a /tmp/zimbra-restore.log >/dev/null || return 1
 }
 
-# Simple value extractor (single-line values only, but handles most cases)
-get_pref_value_simple() {
+# ─────────────────────────────────────────────────────────────────────────────
+# FIXED: Multi-line value extractor using awk
+# ─────────────────────────────────────────────────────────────────────────────
+get_pref_value_multiline() {
   local file="$1"
   local attr="$2"
-  # Get the line starting with "attr:" and extract value after first colon
-  grep "^${attr}:" "$file" 2>/dev/null | head -1 | sed "s/^${attr}:[[:space:]]*//" || true
+  
+  # AWK script to extract multi-line values:
+  # - Find line starting with "attr:"
+  # - Print value after first colon
+  # - Continue printing subsequent lines until next attribute (line starting with word+:)
+  awk -v ATTR="$attr:" '
+    BEGIN { found=0; first=1 }
+    $0 ~ "^"ATTR {
+      found=1
+      first=1
+      # Remove "attr: " prefix and print rest of line
+      sub(/^'"$ATTR"'[[:space:]]*/, "")
+      if (length($0) > 0) printf "%s", $0
+      next
+    }
+    found {
+      # If line starts with a new attribute (word followed by colon), stop
+      if ($0 ~ /^[a-zA-Z][a-zA-Z0-9_-]*:/) {
+        exit
+      }
+      # Otherwise, this is continuation of value - print with space
+      if (!first) printf " %s", $0
+      else { printf "%s", $0; first=0 }
+    }
+  ' "$file" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -179,7 +204,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: MAILBOXES (FIXED: Correct postRestURL syntax)
+# RESTORE: MAILBOXES
 # ─────────────────────────────────────────────────────────────────────────────
 restore_mailboxes() {
   log "Restoring mailboxes (OSE mode: postRestURL)..."
@@ -214,13 +239,10 @@ restore_mailboxes() {
     
     log "   Restoring mailbox: $acc"
     
-    # FIX: Correct postRestURL syntax (file as argument, not redirection)
-    # Syntax: zmmailbox -z -m user@domain postRestURL [opts] {relative-path} {file-name}
     local restore_output
     restore_output=$(su - "$ZIMBRA_USER" -c "zmmailbox -z -m '$acc' postRestURL '/?fmt=tgz&resolve=skip' '$f'" 2>&1) || true
     echo "$restore_output" >> /tmp/zimbra-restore.log
     
-    # Check for success (no "usage:" or "error" in output)
     if echo "$restore_output" | grep -qi "usage:\|error\|exception\|fail"; then
       fail=$((fail+1)); fail "      ✗ $acc"
       log "   Error: $(echo "$restore_output" | head -2)"
@@ -232,10 +254,10 @@ restore_mailboxes() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESTORE: PREFERENCES (FIXED: Simple extraction + no set -u conflict)
+# RESTORE: PREFERENCES (FIXED: Multi-line value support)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
-  log "Restoring user preferences (signatures, forwarding, status)..."
+  log "Restoring user preferences (signatures, filters, forwarding, status)..."
   local dir="$BACKUP_ROOT/mailboxes/$BACKUP_DATE"
   if [ ! -d "$dir" ]; then
     warn "   Not found"
@@ -259,13 +281,16 @@ restore_preferences() {
     local applied=0
     local failed_list=""
     
-    # Attributes to restore (simple, single-line values)
-    for ATTR in "zimbraAccountStatus" "zimbraPrefMailForwardingAddress" "zimbraPrefSignature"; do
-      # Extract value using simple grep+sed (handles most cases)
+    # Attributes to restore
+    for ATTR in "zimbraAccountStatus" "zimbraPrefMailForwardingAddress" "zimbraSignatureName" "zimbraPrefMailSignatureHTML" "zimbraPrefDefaultSignatureId" "zimbraPrefForwardReplySignatureId"; do
+      # Extract value using multi-line aware function
       local value
-      value=$(get_pref_value_simple "$pref_file" "$ATTR")
+      value=$(get_pref_value_multiline "$pref_file" "$ATTR")
       
+      # Debug: show what we extracted
       if [ -n "$value" ] && [ "$value" != "$ATTR" ]; then
+        log "     Found $ATTR: $(echo "$value" | head -c 100)..."
+        
         # Escape single quotes for safe command execution
         local escaped_value
         escaped_value=$(printf '%s' "$value" | sed "s/'/\\\\'/g")
@@ -273,9 +298,13 @@ restore_preferences() {
         log "     Setting $ATTR"
         if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$ATTR' '$escaped_value'" 2>/dev/null; then
           applied=$((applied+1))
+          log "     ✓ Applied $ATTR"
         else
           failed_list="${failed_list}${ATTR},"
+          log "     ✗ Failed to apply $ATTR"
         fi
+      else
+        log "     ⚠ $ATTR not found or empty in backup"
       fi
     done
     
@@ -360,6 +389,6 @@ echo -e "${GREEN}========================================================${NC}"
 echo -e "Log: /tmp/zimbra-restore.log"
 echo -e "${YELLOW}Verify:${NC}"
 echo -e "  su - zimbra -c 'zmprov gaa | grep $DOMAIN'"
-echo -e "  su - zimbra -c 'zmmailbox -z -m user@$DOMAIN getFolder /'"
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefSignature'"
 echo -e "  su - zimbra -c 'zmprov gdlm officer@$DOMAIN'"
 echo -e "${GREEN}========================================================${NC}\n"
