@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v3.12
-# FINAL: Base64 for signature HTML + restore all signature IDs
+# zimbra-restore.sh v3.13
+# FINAL: Complete Signature Restore Logic (Name -> HTML -> Get New ID -> Set Default IDs)
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -72,7 +72,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.12${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.13${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -156,7 +156,7 @@ account_exists() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SET ATTRIBUTE (zmprov - for simple values)
+# SET ATTRIBUTE (zmprov)
 # ─────────────────────────────────────────────────────────────────────────────
 set_zimbra_attr() {
   local acc="$1"
@@ -274,7 +274,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3: RESTORE PREFERENCES (COMPLETE SIGNATURE RESTORE)
+# STEP 3: RESTORE PREFERENCES (COMPLETE SIGNATURE LOGIC)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Step 3: Restoring preferences..."
@@ -295,16 +295,15 @@ restore_preferences() {
     local failed_list=""
     
     # ───────────────────────────────────────────────────────────────────────
-    # COMPLETE SIGNATURE RESTORE (Name + HTML + IDs)
+    # COMPLETE SIGNATURE RESTORE (Exact logic from your reference script)
     # ───────────────────────────────────────────────────────────────────────
-    local sig_name sig_html backup_sig_id
+    local sig_name sig_html
     sig_name=$(get_pref_value "$pref_file" "zimbraSignatureName")
     sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML" "zimbraPrefMailSignatureStyle" "false")
-    backup_sig_id=$(get_pref_value "$pref_file" "zimbraPrefDefaultSignatureId")
     
     local signature_restored=false
     
-    # Step 1: Set signature name
+    # Step 1: Set Signature Name
     if [ -n "$sig_name" ] && [ "$sig_name" != "zimbraSignatureName" ]; then
       log "     Setting signature name: $sig_name"
       if set_zimbra_attr "$acc" "zimbraSignatureName" "$sig_name"; then
@@ -316,7 +315,7 @@ restore_preferences() {
       fi
     fi
     
-    # Step 2: Set signature HTML (BASE64 approach from v3.9)
+    # Step 2: Set Signature HTML (Base64)
     if [ -n "$sig_html" ] && [ "$signature_restored" = "true" ]; then
       log "     Setting signature HTML (${#sig_html} chars)"
       local temp_html="/tmp/sig_${fn}.html"
@@ -325,6 +324,7 @@ restore_preferences() {
       
       if set_signature_html_base64 "$acc" "$temp_html"; then
         log "     ✓ Set signature HTML"
+        # Signature is now fully created, Zimbra has generated a new ID
       else
         log "     ✗ Failed to set signature HTML"
         failed_list="${failed_list}signature_html,"
@@ -332,42 +332,49 @@ restore_preferences() {
       fi
     fi
     
-    # Step 3: Get or set signature ID
+    # Step 3: GET the newly generated Signature ID from Zimbra
+    # This is the critical step you pointed out!
     if [ "$signature_restored" = "true" ]; then
-      # Try to get auto-generated signature ID first
-      local current_sig_id
-      current_sig_id=$(get_zimbra_attr "$acc" "zimbraSignatureId")
+      log "     Getting auto-generated Signature ID..."
       
-      if [ -n "$current_sig_id" ]; then
-        log "     ✓ Got signature ID: $current_sig_id"
+      # Create temp file for ID
+      local temp_id_file="/tmp/firmaid_${fn}.txt"
+      
+      # Run zmprov ga to get zimbraSignatureId
+      su - "$ZIMBRA_USER" -c "zmprov ga '$acc' zimbraSignatureId" > "$temp_id_file" 2>/dev/null
+      
+      # Extract ID (remove header line and attribute name)
+      # Format of file:
+      # # name user@domain.com
+      # zimbraSignatureId: uuid-here
+      local firmaid
+      firmaid=$(sed -n '2p' "$temp_id_file" | sed 's/zimbraSignatureId:[[:space:]]*//')
+      
+      rm -f "$temp_id_file"
+      
+      if [ -n "$firmaid" ]; then
+        log "     ✓ Got new Signature ID: $firmaid"
         
-        # Set default signature ID
-        if set_zimbra_attr "$acc" "zimbraPrefDefaultSignatureId" "$current_sig_id"; then
-          log "     ✓ Set default signature ID"
+        # Step 4: Set Default Signature ID
+        if set_zimbra_attr "$acc" "zimbraPrefDefaultSignatureId" "$firmaid"; then
+          log "     ✓ Set zimbraPrefDefaultSignatureId"
           applied=$((applied+1))
         else
-          log "     ⚠ Could not set default signature ID"
+          log "     ✗ Failed to set zimbraPrefDefaultSignatureId"
+          failed_list="${failed_list}default_sig_id,"
         fi
         
-        # Set forward/reply signature ID
-        if set_zimbra_attr "$acc" "zimbraPrefForwardReplySignatureId" "$current_sig_id"; then
-          log "     ✓ Set forward/reply signature ID"
+        # Step 5: Set Forward/Reply Signature ID
+        if set_zimbra_attr "$acc" "zimbraPrefForwardReplySignatureId" "$firmaid"; then
+          log "     ✓ Set zimbraPrefForwardReplySignatureId"
           applied=$((applied+1))
         else
-          log "     ⚠ Could not set forward/reply signature ID"
+          log "     ✗ Failed to set zimbraPrefForwardReplySignatureId"
+          failed_list="${failed_list}forward_sig_id,"
         fi
-      elif [ -n "$backup_sig_id" ] && [ "$backup_sig_id" != "zimbraPrefDefaultSignatureId" ]; then
-        # Fallback: use backup signature ID
-        log "     ⚠ Using backup signature ID: $backup_sig_id"
-        if set_zimbra_attr "$acc" "zimbraPrefDefaultSignatureId" "$backup_sig_id"; then
-          log "     ✓ Set default signature ID from backup"
-          applied=$((applied+1))
-        fi
-        
-        if set_zimbra_attr "$acc" "zimbraPrefForwardReplySignatureId" "$backup_sig_id"; then
-          log "     ✓ Set forward/reply signature ID from backup"
-          applied=$((applied+1))
-        fi
+      else
+        log "     ✗ Could not extract Signature ID"
+        failed_list="${failed_list}sig_id_extract,"
       fi
     fi
     
