@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v3.6
-# FINAL: Fixed temp file approach (no complex escaping)
+# zimbra-restore.sh v3.7
+# FINAL: Back to v3.4 temp file approach (which worked for filters)
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -72,7 +72,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.6${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.7${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -162,7 +162,7 @@ get_zimbra_attr() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SIMPLE SET ATTRIBUTE
+# SIMPLE SET ATTRIBUTE (for simple values)
 # ─────────────────────────────────────────────────────────────────────────────
 set_zimbra_attr() {
   local acc="$1"
@@ -172,9 +172,9 @@ set_zimbra_attr() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIXED: SET ATTRIBUTE FROM FILE (NO COMPLEX ESCAPING)
+# SET ATTRIBUTE WITH TEMP FILE (for complex values - V3.4 APPROACH)
 # ─────────────────────────────────────────────────────────────────────────────
-set_zimbra_attr_from_file() {
+set_zimbra_attr_with_file() {
   local acc="$1"
   local attr="$2"
   local value="$3"
@@ -183,20 +183,16 @@ set_zimbra_attr_from_file() {
   # Write value to temp file
   printf '%s' "$value" > "$temp_file"
   
-  # Read file content as zimbra user and apply
-  local result
-  result=$(su - "$ZIMBRA_USER" -c "cat '$temp_file'" 2>/dev/null)
+  # Read file content and pass as argument (V3.4 approach that worked!)
+  local content
+  content=$(cat "$temp_file")
   
-  if [ -n "$result" ]; then
-    # Apply using the content
-    timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$attr'" <<< "$result" 2>/dev/null
-  else
-    rm -f "$temp_file"
-    return 1
-  fi
+  # Apply using zmprov with the content
+  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$attr' '$content'" 2>/dev/null
+  local result=$?
   
   rm -f "$temp_file"
-  return 0
+  return $result
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -263,7 +259,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3: RESTORE PREFERENCES
+# STEP 3: RESTORE PREFERENCES (V3.4 APPROACH - TEMP FILE)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Step 3: Restoring preferences..."
@@ -284,7 +280,7 @@ restore_preferences() {
     local failed_list=""
     
     # ───────────────────────────────────────────────────────────────────────
-    # 1. Signature HTML (simplified - just set HTML directly)
+    # 1. Signature HTML (V3.4 temp file approach)
     # ───────────────────────────────────────────────────────────────────────
     local sig_html
     sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML" "zimbraPrefMailSignatureStyle" "false")
@@ -293,19 +289,13 @@ restore_preferences() {
       log "     Setting signature HTML (${#sig_html} chars)"
       local temp_html="/tmp/sig_${fn}.html"
       
-      # Write HTML to temp file
-      printf '%s' "$sig_html" > "$temp_html"
-      
-      # Set using heredoc to avoid escaping issues
-      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraPrefMailSignatureHTML" < "$temp_html" 2>/dev/null; then
+      if set_zimbra_attr_with_file "$acc" "zimbraPrefMailSignatureHTML" "$sig_html" "$temp_html"; then
         log "     ✓ Set signature HTML"
         applied=$((applied+1))
       else
         log "     ✗ Failed to set signature HTML"
         failed_list="${failed_list}signature,"
       fi
-      
-      rm -f "$temp_html"
     fi
     
     # ───────────────────────────────────────────────────────────────────────
@@ -318,7 +308,7 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 3. Filters (Sieve script with newlines)
+    # 3. Filters (V3.4 temp file approach - ALREADY WORKING)
     # ───────────────────────────────────────────────────────────────────────
     local sieve_script
     sieve_script=$(get_pref_value_multiline "$pref_file" "zimbraMailSieveScript" "zimbraMailSieveScriptMaxSize" "true")
@@ -327,19 +317,13 @@ restore_preferences() {
       log "     Restoring filters (${#sieve_script} chars)"
       local temp_sieve="/tmp/sieve_${fn}.sieve"
       
-      # Write Sieve script to temp file (preserve newlines)
-      printf '%s' "$sieve_script" > "$temp_sieve"
-      
-      # Set using heredoc
-      if su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraMailSieveScript" < "$temp_sieve" 2>/dev/null; then
+      if set_zimbra_attr_with_file "$acc" "zimbraMailSieveScript" "$sieve_script" "$temp_sieve"; then
         log "     ✓ Applied Sieve script"
         applied=$((applied+1))
       else
         log "     ✗ Failed to apply Sieve script"
         failed_list="${failed_list}filters,"
       fi
-      
-      rm -f "$temp_sieve"
     fi
     
     # Summary
