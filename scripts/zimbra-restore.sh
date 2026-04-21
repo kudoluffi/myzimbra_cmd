@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-restore.sh v3.4
-# FIXED: Proper escaping for HTML signatures + Preserve newlines in Sieve scripts
+# zimbra-restore.sh v3.5
+# FIXED: Signature HTML - use temp file approach (like Sieve scripts)
 # Usage: sudo bash zimbra-restore.sh --mode MODES [FILTERS] BACKUP_DATE
 
 set -eo pipefail
@@ -80,7 +80,7 @@ get_backup_domain() {
 DOMAIN=$(get_backup_domain)
 
 echo -e "\n${GREEN}========================================================${NC}" >&2
-echo -e "${GREEN}  Zimbra Restore Script v3.4${NC}" >&2
+echo -e "${GREEN}  Zimbra Restore Script v3.5${NC}" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
 
 log "Backup: $BACKUP_DATE | Domain: $DOMAIN | Modes: $MODES"
@@ -108,7 +108,7 @@ get_pref_value() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Multi-line value extractor (for Sieve scripts & HTML signatures)
+# Multi-line value extractor
 # ─────────────────────────────────────────────────────────────────────────────
 get_pref_value_multiline() {
   local file="$1"
@@ -118,13 +118,11 @@ get_pref_value_multiline() {
   
   if [ -n "$next_attr" ]; then
     if [ "$preserve_newlines" = "true" ]; then
-      # For Sieve scripts: preserve newlines
       sed -n "/^${attr}:/,/^${next_attr}:/p" "$file" 2>/dev/null | \
         head -n -1 | \
         sed "1s/^${attr}:[[:space:]]*//" | \
         sed 's/^[[:space:]]*//' || true
     else
-      # For HTML signatures: convert to single line
       sed -n "/^${attr}:/,/^${next_attr}:/p" "$file" 2>/dev/null | \
         head -n -1 | \
         sed "1s/^${attr}:[[:space:]]*//" | \
@@ -133,22 +131,12 @@ get_pref_value_multiline() {
         sed 's/[[:space:]]*$//' || true
     fi
   else
-    # Fallback without next_attr
     awk -v ATTR="$attr:" -v PRESERVE="$preserve_newlines" '
       $0 ~ "^"ATTR { found=1; sub(/^'"$ATTR"'[[:space:]]*/, ""); printf "%s", $0; next }
       found && /^[a-zA-Z][a-zA-Z0-9_-]*:/ { exit }
       found { if (PRESERVE == "true") printf "\n%s", $0; else printf " %s", $0 }
     ' "$file" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' || true
   fi
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
-# FIXED: Better escaping for zmprov ma command
-# ─────────────────────────────────────────────────────────────────────────────
-escape_for_zmprov() {
-  local value="$1"
-  # Escape single quotes, double quotes, and backslashes for shell safety
-  printf '%s' "$value" | sed "s/'/\\\\'/g" | sed 's/"/\\"/g' | sed 's/\\/\\\\/g'
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -223,19 +211,39 @@ get_zimbra_attr() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FIXED: Set attribute with proper escaping
+# Simple set attribute (for simple values)
 # ─────────────────────────────────────────────────────────────────────────────
 set_zimbra_attr() {
   local acc="$1"
   local attr="$2"
   local value="$3"
+  timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' '$attr' '$value'" 2>/dev/null || return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FIXED: Set attribute from file (for complex values like HTML/Sieve)
+# ─────────────────────────────────────────────────────────────────────────────
+set_zimbra_attr_from_file() {
+  local acc="$1"
+  local attr="$2"
+  local value="$3"
+  local temp_file="$4"
   
-  # Escape value properly for shell
-  local escaped_value
-  escaped_value=$(escape_for_zmprov "$value")
+  # Write value to temp file
+  echo "$value" > "$temp_file"
   
-  # Use bash -c to handle complex values
-  timeout "$ZMPROV_TIMEOUT" bash -c "su - $ZIMBRA_USER -c \"zmprov ma '$acc' '$attr' '$escaped_value'\"" 2>/dev/null || return 1
+  # Use bash -c to read file content and pass to zmprov
+  local result
+  result=$(timeout "$ZMPROV_TIMEOUT" bash -c "su - $ZIMBRA_USER -c \"zmprov ma '$acc' '$attr' \"\\\$(cat '$temp_file')\"\"" 2>&1) || true
+  
+  rm -f "$temp_file"
+  
+  if [ -z "$result" ] || ! echo "$result" | grep -qi "error\|fail"; then
+    return 0
+  else
+    log "   zmprov error: $result" >&2
+    return 1
+  fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -330,7 +338,7 @@ restore_passwords() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STEP 3: RESTORE PREFERENCES (FIXED: Proper escaping + newlines)
+# STEP 3: RESTORE PREFERENCES (FIXED: Signature HTML from file)
 # ─────────────────────────────────────────────────────────────────────────────
 restore_preferences() {
   log "Step 3: Restoring preferences (forwarding, filters, signatures)..."
@@ -356,16 +364,16 @@ restore_preferences() {
     local failed_list=""
     
     # ───────────────────────────────────────────────────────────────────────
-    # 1. Signature (FIXED: Better HTML escaping)
+    # 1. Signature (FIXED: Write HTML to temp file)
     # ───────────────────────────────────────────────────────────────────────
     local sig_name sig_html
     sig_name=$(get_pref_value "$pref_file" "zimbraSignatureName")
     
-    # Extract HTML signature (single line for zmprov)
+    # Extract HTML signature (single line, preserve &quot; entities)
     sig_html=$(get_pref_value_multiline "$pref_file" "zimbraPrefMailSignatureHTML" "zimbraPrefMailSignatureStyle" "false")
     
     [ -n "$sig_name" ] && log "     Found signature name: $sig_name"
-    [ -n "$sig_html" ] && log "     Found signature HTML: $(echo "$sig_html" | head -c 100)..."
+    [ -n "$sig_html" ] && log "     Found signature HTML: ${#sig_html} chars"
     
     if [ -n "$sig_name" ] && [ -n "$sig_html" ]; then
       log "     Restoring signature: $sig_name"
@@ -380,9 +388,11 @@ restore_preferences() {
         if [ -n "$sig_id" ]; then
           log "     ✓ Got signature ID: $sig_id"
           
-          # Set HTML content (already escaped by set_zimbra_attr)
-          log "     Setting signature HTML (${#sig_html} chars)"
-          if set_zimbra_attr "$acc" "zimbraPrefMailSignatureHTML" "$sig_html"; then
+          # FIXED: Write HTML to temp file to avoid escaping issues
+          local temp_html="/tmp/sig_${acc//[@\/.]/_}.html"
+          log "     Setting signature HTML from file (${#sig_html} chars)"
+          
+          if set_zimbra_attr_from_file "$acc" "zimbraPrefMailSignatureHTML" "$sig_html" "$temp_html"; then
             log "     ✓ Set signature HTML"
             applied=$((applied+1))
             
@@ -397,7 +407,6 @@ restore_preferences() {
             fi
           else
             log "     ✗ Failed to set signature HTML"
-            log "     Debug: First 200 chars: $(echo "$sig_html" | head -c 200)"
             failed_list="${failed_list}signature_html,"
           fi
         else
@@ -436,48 +445,29 @@ restore_preferences() {
     fi
     
     # ───────────────────────────────────────────────────────────────────────
-    # 3. Filters (FIXED: Preserve newlines in Sieve script)
+    # 3. Filters (using temp file - already working)
     # ───────────────────────────────────────────────────────────────────────
     local sieve_script
-    # Extract Sieve script WITH newlines preserved
     sieve_script=$(get_pref_value_multiline "$pref_file" "zimbraMailSieveScript" "zimbraMailSieveScriptMaxSize" "true")
     
     if [ -n "$sieve_script" ] && [ "$sieve_script" != "zimbraMailSieveScript" ]; then
       log "     Restoring filters..."
       log "     Sieve script length: ${#sieve_script} chars"
-      log "     First 200 chars: $(echo "$sieve_script" | head -c 200)"
       
       if echo "$sieve_script" | grep -q "^require"; then
-        # Write Sieve script to temp file to preserve newlines
-        local temp_sieve="/tmp/sieve_${acc//[@\/]/_}.sieve"
-        echo "$sieve_script" > "$temp_sieve"
+        local temp_sieve="/tmp/sieve_${acc//[@\/.]/_}.sieve"
         
-        log "     Setting Sieve script from file..."
-        # Use zmprov with file input to preserve newlines
-        if timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraMailSieveScript \"\$(cat '$temp_sieve')\"" 2>/dev/null; then
+        if set_zimbra_attr_from_file "$acc" "zimbraMailSieveScript" "$sieve_script" "$temp_sieve"; then
           applied=$((applied+1))
           log "     ✓ Applied Sieve script"
         else
-          # Fallback: try direct command
-          log "     Trying fallback method..."
-          local escaped_sieve
-          escaped_sieve=$(printf '%s' "$sieve_script" | sed "s/'/\\\\'/g")
-          if timeout "$ZMPROV_TIMEOUT" su - "$ZIMBRA_USER" -c "zmprov ma '$acc' zimbraMailSieveScript '$escaped_sieve'" 2>/dev/null; then
-            applied=$((applied+1))
-            log "     ✓ Applied Sieve script (fallback)"
-          else
-            log "     ✗ Failed to apply Sieve script"
-            failed_list="${failed_list}filters,"
-          fi
+          log "     ✗ Failed to apply Sieve script"
+          failed_list="${failed_list}filters,"
         fi
-        
-        rm -f "$temp_sieve"
       else
-        log "     ⚠ Invalid Sieve script (missing 'require')"
+        log "     ⚠ Invalid Sieve script"
         failed_list="${failed_list}filters,"
       fi
-    else
-      log "     ⚠ No Sieve script found in backup"
     fi
     
     # Summary
@@ -607,5 +597,5 @@ echo -e "Log: /tmp/zimbra-restore.log" >&2
 echo -e "${YELLOW}Verify:${NC}" >&2
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraAccountStatus'" >&2
 echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraPrefMailSignatureHTML'" >&2
-echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraMailSieveScript' | head -10" >&2
+echo -e "  su - zimbra -c 'zmprov ga user@$DOMAIN zimbraMailSieveScript' | head -5" >&2
 echo -e "${GREEN}========================================================${NC}" >&2
