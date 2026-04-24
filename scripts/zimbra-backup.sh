@@ -1,7 +1,7 @@
 #!/bin/bash
-# zimbra-backup.sh v2.0
-# FIXED: Correct distribution list backup (zmprov gadl + gdlm)
-# Usage: sudo bash zimbra-backup.sh [full|incremental]
+# zimbra-backup.sh v2.3
+# FIXED: Restored BACKUP-SUMMARY.txt + Fixed Empty Log Files
+# Usage: sudo bash zimbra-backup.sh [weekly|daily]
 
 set -u
 
@@ -23,7 +23,10 @@ ZIMBRA_USER="zimbra"
 LOG_FILE="/var/log/zimbra-backup-${BACKUP_DATE}.log"
 SERVER_NAME=$(hostname -f)
 
-# EXCLUDED ACCOUNTS (regex patterns)
+# Status yang diizinkan untuk DAILY backup
+DAILY_ALLOWED_STATUSES="active locked lockout"
+
+# System accounts yang TIDAK PERNAH di-backup
 EXCLUDE_PATTERNS=(
   "^admin@"
   "^spam\."
@@ -34,19 +37,30 @@ EXCLUDE_PATTERNS=(
   "^abuse@"
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# LOGGING FIX: Redirect ALL output to log file AND terminal
+# ─────────────────────────────────────────────────────────────────────────────
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MODE SELECTION
+# ─────────────────────────────────────────────────────────────────────────────
 BACKUP_TYPE="${1:-auto}"
+
 if [ "$BACKUP_TYPE" = "auto" ]; then
   if [ "$DAY_OF_WEEK" = "7" ]; then
-    BACKUP_TYPE="full"
+    BACKUP_TYPE="weekly"
   else
-    BACKUP_TYPE="incremental"
+    BACKUP_TYPE="daily"
   fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# FUNCTION: Check if account should be excluded
+# FUNCTIONS
 # ─────────────────────────────────────────────────────────────────────────────
-should_exclude() {
+
+# Cek apakah akun adalah system account
+should_exclude_system() {
   local account="$1"
   for pattern in "${EXCLUDE_PATTERNS[@]}"; do
     if echo "$account" | grep -qE "$pattern"; then
@@ -54,6 +68,53 @@ should_exclude() {
     fi
   done
   return 1
+}
+
+# Generate Account List (Filtered)
+generate_filtered_account_list() {
+  local output_file="$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt"
+  local raw_list
+  
+  # Get all accounts from LDAP
+  raw_list=$(su - $ZIMBRA_USER -c "zmprov -l gaa" 2>/dev/null)
+  
+  if [ -z "$raw_list" ]; then
+    warn "   Failed to get account list!"
+    return 1
+  fi
+
+  > "$output_file"
+
+  while IFS= read -r account; do
+    [ -z "$account" ] && continue
+    
+    if should_exclude_system "$account"; then
+      continue
+    fi
+
+    if [ "$BACKUP_TYPE" = "daily" ]; then
+      local status
+      status=$(su - $ZIMBRA_USER -c "zmprov ga '$account' zimbraAccountStatus" 2>/dev/null | awk '{print $2}')
+      
+      if ! echo "$DAILY_ALLOWED_STATUSES" | grep -qw "$status"; then
+        log "   ⏭️  Skip $account (Status: $status)"
+        continue
+      fi
+    fi
+
+    echo "$account" >> "$output_file"
+    
+  done <<< "$raw_list"
+
+  if [ -s "$output_file" ]; then
+    ACCOUNT_COUNT=$(wc -l < "$output_file")
+    pass "   Account list generated: $ACCOUNT_COUNT accounts (Mode: $BACKUP_TYPE)"
+    return 0
+  else
+    warn "   No accounts found to backup!"
+    ACCOUNT_COUNT=0
+    return 1
+  fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -65,13 +126,14 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Backup Script (v2.0 - FIXED DL)${NC}"
+echo -e "${GREEN}  Zimbra Backup Script (v2.3 - Fixed Logs & Summary)${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
 log "Backup Date: $BACKUP_DATE"
 log "Server: $SERVER_NAME"
 log "Backup Type: $BACKUP_TYPE"
 log "Backup Root: $BACKUP_ROOT"
+log "Log File: $LOG_FILE"
 echo ""
 
 # Create backup directories
@@ -84,118 +146,85 @@ chmod 700 "$BACKUP_ROOT/passwords"
 pass "Backup directories created"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. CONFIG BACKUP
+# 1. CONFIG BACKUP (ONLY FOR WEEKLY)
 # ─────────────────────────────────────────────────────────────────────────────
-log "1. Backing up Zimbra configuration..."
+if [ "$BACKUP_TYPE" = "weekly" ]; then
+  log "1. Backing up Zimbra configuration..."
 
-log "   Exporting global config..."
-su - $ZIMBRA_USER -c "zmprov gacf > $BACKUP_ROOT/config/global-config-${BACKUP_DATE}.txt" 2>&1
-if [ -s "$BACKUP_ROOT/config/global-config-${BACKUP_DATE}.txt" ]; then
-  FILE_SIZE=$(du -h "$BACKUP_ROOT/config/global-config-${BACKUP_DATE}.txt" | cut -f1)
-  pass "   Global config exported ($FILE_SIZE)"
+  log "   Exporting global config..."
+  su - $ZIMBRA_USER -c "zmprov gacf > $BACKUP_ROOT/config/global-config-${BACKUP_DATE}.txt" 2>&1
+  [ -s "$BACKUP_ROOT/config/global-config-${BACKUP_DATE}.txt" ] && pass "   Global config exported" || fail "   Global config export failed"
+
+  log "   Exporting server config..."
+  su - $ZIMBRA_USER -c "zmprov gs $SERVER_NAME > $BACKUP_ROOT/config/server-config-${BACKUP_DATE}.txt" 2>&1
+  [ -s "$BACKUP_ROOT/config/server-config-${BACKUP_DATE}.txt" ] && pass "   Server config exported" || fail "   Server config export failed"
+
+  log "   Exporting local config..."
+  zmlocalconfig -m > "$BACKUP_ROOT/config/local-config-${BACKUP_DATE}.txt" 2>&1
+  [ -s "$BACKUP_ROOT/config/local-config-${BACKUP_DATE}.txt" ] && pass "   Local config exported" || fail "   Local config export failed"
+
+  log "   Saving Zimbra version info..."
+  su - $ZIMBRA_USER -c "zmcontrol -v > $BACKUP_ROOT/config/zimbra-version-${BACKUP_DATE}.txt" 2>&1
+  pass "   Version info saved"
 else
-  fail "   Global config export failed"
+  log "1. Skipping Config Backup (Daily Mode - User Data Only)"
 fi
-
-log "   Exporting server config..."
-su - $ZIMBRA_USER -c "zmprov gs $SERVER_NAME > $BACKUP_ROOT/config/server-config-${BACKUP_DATE}.txt" 2>&1
-if [ -s "$BACKUP_ROOT/config/server-config-${BACKUP_DATE}.txt" ]; then
-  pass "   Server config exported"
-else
-  fail "   Server config export failed"
-fi
-
-log "   Exporting local config..."
-zmlocalconfig -m > "$BACKUP_ROOT/config/local-config-${BACKUP_DATE}.txt" 2>&1
-if [ -s "$BACKUP_ROOT/config/local-config-${BACKUP_DATE}.txt" ]; then
-  pass "   Local config exported"
-else
-  fail "   Local config export failed"
-fi
-
-log "   Saving Zimbra version info..."
-su - $ZIMBRA_USER -c "zmcontrol -v > $BACKUP_ROOT/config/zimbra-version-${BACKUP_DATE}.txt" 2>&1
-pass "   Version info saved"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. ACCOUNTS & DISTRIBUTION LISTS (FIXED!)
+# 2. DOMAINS & DISTRIBUTION LISTS (ONLY FOR WEEKLY)
 # ─────────────────────────────────────────────────────────────────────────────
-log "2. Backing up accounts and distribution lists..."
+if [ "$BACKUP_TYPE" = "weekly" ]; then
+  log "2. Backing up Domains & Distribution Lists..."
 
-# All domains
-log "   Exporting domain list..."
-su - $ZIMBRA_USER -c "zmprov gad > $BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt" 2>&1
-if [ -s "$BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt" ]; then
-  DOMAIN_COUNT=$(wc -l < "$BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt")
-  pass "   Found $DOMAIN_COUNT domain(s)"
-else
-  fail "   Domain list export failed"
-  DOMAIN_COUNT=0
-fi
+  log "   Exporting domain list..."
+  su - $ZIMBRA_USER -c "zmprov gad > $BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt" 2>&1
+  [ -s "$BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt" ] && pass "   Domain list exported" || fail "   Domain list export failed"
 
-# All accounts (USE -l FLAG!)
-log "   Exporting account list (zmprov -l gaa)..."
-su - $ZIMBRA_USER -c "zmprov -l gaa > $BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt" 2>&1
+  log "   Exporting distribution lists..."
+  DL_LIST_FILE="$BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt"
+  su - $ZIMBRA_USER -c "zmprov gadl > '$DL_LIST_FILE'" 2>&1
 
-if [ -s "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt" ]; then
-  FIRST_LINE=$(head -1 "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt")
-  if echo "$FIRST_LINE" | grep -q "@"; then
-    ACCOUNT_COUNT=$(wc -l < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt")
-    pass "   Found $ACCOUNT_COUNT account(s)"
+  if [ -s "$DL_LIST_FILE" ]; then
+    DL_COUNT=$(wc -l < "$DL_LIST_FILE")
+    pass "   Found $DL_COUNT distribution list(s)"
+    
+    log "   Exporting distribution list members..."
+    DL_MEMBER_COUNT=0
+    while IFS= read -r dl_email; do
+      if [ -n "$dl_email" ] && echo "$dl_email" | grep -q "@"; then
+        DL_SAFE_NAME=$(echo "$dl_email" | tr '@' '_' | tr '.' '_')
+        DL_MEMBER_FILE="$BACKUP_ROOT/distribution-lists/dl-members-${DL_SAFE_NAME}-${BACKUP_DATE}.txt"
+        su - $ZIMBRA_USER -c "zmprov gdlm '$dl_email' > '$DL_MEMBER_FILE'" 2>&1
+        [ -s "$DL_MEMBER_FILE" ] && DL_MEMBER_COUNT=$((DL_MEMBER_COUNT + $(grep -c "@" "$DL_MEMBER_FILE" 2>/dev/null || echo 0)))
+      fi
+    done < "$DL_LIST_FILE"
+    pass "   Distribution list members exported: $DL_MEMBER_COUNT total members"
   else
-    fail "   Account list contains help menu instead of accounts!"
-    ACCOUNT_COUNT=0
+    warn "   No distribution lists found"
+    DL_COUNT=0
+    DL_MEMBER_COUNT=0
   fi
 else
-  fail "   Account list export failed"
-  ACCOUNT_COUNT=0
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DISTRIBUTION LISTS (FIXED: Use gadl + gdlm)
-# ─────────────────────────────────────────────────────────────────────────────
-log "   Exporting distribution lists (zmprov gadl)..."
-
-DL_LIST_FILE="$BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt"
-su - $ZIMBRA_USER -c "zmprov gadl > '$DL_LIST_FILE'" 2>&1
-
-if [ -s "$DL_LIST_FILE" ]; then
-  DL_COUNT=$(wc -l < "$DL_LIST_FILE")
-  pass "   Found $DL_COUNT distribution list(s)"
-  
-  # Export members for EACH distribution list
-  log "   Exporting distribution list members..."
-  DL_MEMBER_COUNT=0
-  
-  while IFS= read -r dl_email; do
-    if [ -n "$dl_email" ] && echo "$dl_email" | grep -q "@"; then
-      # Create safe filename from DL email
-      DL_SAFE_NAME=$(echo "$dl_email" | tr '@' '_' | tr '.' '_')
-      DL_MEMBER_FILE="$BACKUP_ROOT/distribution-lists/dl-members-${DL_SAFE_NAME}-${BACKUP_DATE}.txt"
-      
-      # Export members using gdlm (Get Distribution List Members)
-      su - $ZIMBRA_USER -c "zmprov gdlm '$dl_email' > '$DL_MEMBER_FILE'" 2>&1
-      
-      if [ -s "$DL_MEMBER_FILE" ]; then
-        MEMBER_COUNT=$(grep -c "@" "$DL_MEMBER_FILE" 2>/dev/null || echo "0")
-        log "     ✓ $dl_email ($MEMBER_COUNT members)"
-        DL_MEMBER_COUNT=$((DL_MEMBER_COUNT + MEMBER_COUNT))
-      else
-        warn "     ⚠ $dl_email (no members or export failed)"
-      fi
-    fi
-  done < "$DL_LIST_FILE"
-  
-  pass "   Distribution list members exported: $DL_MEMBER_COUNT total members"
-else
-  warn "   No distribution lists found"
+  log "2. Skipping Domains & DLs Backup (Daily Mode - User Data Only)"
+  DOMAIN_COUNT=0
   DL_COUNT=0
+  DL_MEMBER_COUNT=0
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. PASSWORD HASH BACKUP
+# 3. GENERATE FILTERED ACCOUNT LIST
 # ─────────────────────────────────────────────────────────────────────────────
-log "3. Backing up password hashes..."
+log "3. Generating Account List (Filtered by Mode & Status)..."
+ACCOUNT_COUNT=0
+if ! generate_filtered_account_list; then
+  fail "   Critical Error: Cannot generate account list. Aborting."
+  exit 1
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. PASSWORD HASH BACKUP
+# ─────────────────────────────────────────────────────────────────────────────
+log "4. Backing up password hashes..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   mkdir -p "$BACKUP_ROOT/passwords/${BACKUP_DATE}"
@@ -205,23 +234,14 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   PASSWORD_BACKUP_COUNT=0
   
   while IFS= read -r account; do
-    if [ -n "$account" ] && echo "$account" | grep -q "@"; then
-      if should_exclude "$account"; then
-        log "   Skipping password for excluded account: $account"
-        continue
-      fi
-      
-      SAFE_NAME=$(echo "$account" | tr '@' '_')
-      
-      su - $ZIMBRA_USER -c "zmprov -l ga '$account' userPassword" 2>/dev/null | \
-        grep "userPassword:" | \
-        awk '{print $2}' > "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
-      
-      if [ -s "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow" ]; then
-        PASSWORD_BACKUP_COUNT=$((PASSWORD_BACKUP_COUNT + 1))
-        chown zimbra:zimbra "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
-        chmod 600 "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
-      fi
+    SAFE_NAME=$(echo "$account" | tr '@' '_')
+    su - $ZIMBRA_USER -c "zmprov -l ga '$account' userPassword" 2>/dev/null | \
+      grep "userPassword:" | awk '{print $2}' > "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
+    
+    if [ -s "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow" ]; then
+      PASSWORD_BACKUP_COUNT=$((PASSWORD_BACKUP_COUNT + 1))
+      chown zimbra:zimbra "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
+      chmod 600 "$BACKUP_ROOT/passwords/${BACKUP_DATE}/${SAFE_NAME}.shadow"
     fi
   done < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt"
   
@@ -234,35 +254,24 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. MAILBOX BACKUP
+# 5. MAILBOX BACKUP
 # ─────────────────────────────────────────────────────────────────────────────
-log "4. Backing up mailboxes ($BACKUP_TYPE)..."
+log "5. Backing up mailboxes ($BACKUP_TYPE)..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   BACKUP_SUCCESS=0
   BACKUP_FAILED=0
-  SKIPPED_COUNT=0
   
   mkdir -p "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
   chown zimbra:zimbra "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
   
   while IFS= read -r account; do
-    if [ -z "$account" ] || ! echo "$account" | grep -q "@"; then
-      continue
-    fi
-    
-    if should_exclude "$account"; then
-      log "   Skipping excluded account: $account"
-      SKIPPED_COUNT=$((SKIPPED_COUNT + 1))
-      continue
-    fi
-    
     ACCOUNT_NAME=$(echo "$account" | cut -d@ -f1)
     log "   Backing up: $account"
     
     MAILBOX_BACKUP_FILE="$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}.tgz"
     
-    su - $ZIMBRA_USER -c "zmmailbox -z -m '$account' getRestURL '//?fmt=tgz' > '$MAILBOX_BACKUP_FILE'" 2>&1 | tee -a "$LOG_FILE"
+    su - $ZIMBRA_USER -c "zmmailbox -z -m '$account' getRestURL '//?fmt=tgz' > '$MAILBOX_BACKUP_FILE'" 2>&1
     
     if [ -f "$MAILBOX_BACKUP_FILE" ] && [ -s "$MAILBOX_BACKUP_FILE" ]; then
       BACKUP_SUCCESS=$((BACKUP_SUCCESS + 1))
@@ -276,7 +285,7 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   done < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt"
   
   echo ""
-  pass "   Mailbox backup: $BACKUP_SUCCESS success, $BACKUP_FAILED failed, $SKIPPED_COUNT skipped"
+  pass "   Mailbox backup: $BACKUP_SUCCESS success, $BACKUP_FAILED failed"
 else
   warn "   Skipping mailbox backup (no valid accounts found)"
   BACKUP_SUCCESS=0
@@ -284,135 +293,99 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. USER PREFERENCES
+# 6. USER PREFERENCES
 # ─────────────────────────────────────────────────────────────────────────────
-log "5. Backing up user preferences (includes signatures & filters)..."
+log "6. Backing up user preferences..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   USER_PREF_COUNT=0
+  
   while IFS= read -r account; do
-    if [ -n "$account" ] && echo "$account" | grep -q "@"; then
-      if should_exclude "$account"; then
-        continue
-      fi
-      ACCOUNT_NAME=$(echo "$account" | cut -d@ -f1)
-      
-      su - $ZIMBRA_USER -c "zmprov ga '$account' > '$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-preferences.txt'" 2>/dev/null
-      
-      if [ -s "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-preferences.txt" ]; then
-        USER_PREF_COUNT=$((USER_PREF_COUNT + 1))
-      fi
+    ACCOUNT_NAME=$(echo "$account" | cut -d@ -f1)
+    su - $ZIMBRA_USER -c "zmprov ga '$account' > '$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-preferences.txt'" 2>/dev/null
+    
+    if [ -s "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/${ACCOUNT_NAME}-preferences.txt" ]; then
+      USER_PREF_COUNT=$((USER_PREF_COUNT + 1))
     fi
   done < "$BACKUP_ROOT/distribution-lists/accounts-${BACKUP_DATE}.txt"
+  
   pass "   User preferences exported: $USER_PREF_COUNT accounts"
-  log "   ℹ️  Note: preferences.txt includes signatures, filters, and all user settings"
+  log "   ℹ️  preferences.txt includes signatures, filters, and status"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. RETENTION POLICY
+# 7. RETENTION POLICY
 # ─────────────────────────────────────────────────────────────────────────────
-log "6. Applying retention policy ($RETENTION_DAYS days)..."
+log "7. Applying retention policy ($RETENTION_DAYS days)..."
 
 OLD_BACKUPS=$(find "$BACKUP_ROOT/mailboxes" -type d -name "20*" -mtime +$RETENTION_DAYS 2>/dev/null)
 if [ -n "$OLD_BACKUPS" ]; then
-  DELETED_COUNT=0
-  while IFS= read -r old_dir; do
-    rm -rf "$old_dir"
-    DELETED_COUNT=$((DELETED_COUNT + 1))
-  done <<< "$OLD_BACKUPS"
-  pass "   Deleted $DELETED_COUNT old backup directories"
-else
-  log "   No old backups to delete"
+  while IFS= read -r old_dir; do rm -rf "$old_dir"; done <<< "$OLD_BACKUPS"
+  pass "   Deleted old mailbox backups"
 fi
 
 OLD_PASS_BACKUPS=$(find "$BACKUP_ROOT/passwords" -type d -name "20*" -mtime +$RETENTION_DAYS 2>/dev/null)
 if [ -n "$OLD_PASS_BACKUPS" ]; then
-  while IFS= read -r old_dir; do
-    rm -rf "$old_dir"
-  done <<< "$OLD_PASS_BACKUPS"
+  while IFS= read -r old_dir; do rm -rf "$old_dir"; done <<< "$OLD_PASS_BACKUPS"
   pass "   Deleted old password backups"
 fi
 
-log "   Cleaning old config files..."
-cd "$BACKUP_ROOT/config" && ls -t *.txt 2>/dev/null | tail -n +11 | xargs -r rm --
-pass "   Old config files cleaned"
-
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. BACKUP SUMMARY
+# 8. BACKUP SUMMARY (RESTORED)
 # ─────────────────────────────────────────────────────────────────────────────
-log "7. Generating backup summary..."
+log "8. Generating BACKUP-SUMMARY.txt..."
 
 BACKUP_SIZE=$(du -sh "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}" 2>/dev/null | cut -f1)
 TOTAL_BACKUP_SIZE=$(du -sh "$BACKUP_ROOT" 2>/dev/null | cut -f1)
 
+# Ensure directory exists
+mkdir -p "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
+
 cat > "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt" <<EOF
 ========================================================
-  ZIMBRA BACKUP SUMMARY (v2.0 - FIXED DL)
+  ZIMBRA BACKUP SUMMARY (v2.3)
 ========================================================
 Backup Date:    $BACKUP_DATE
 Server:         $SERVER_NAME
-Backup Type:    $BACKUP_TYPE
+Backup Type:    $BACKUP_TYPE (Weekly=All, Daily=Active Only)
 Retention:      $RETENTION_DAYS days
 Backup Size:    $BACKUP_SIZE
 Total Size:     $TOTAL_BACKUP_SIZE
-Domains:        $DOMAIN_COUNT
-Accounts:       $ACCOUNT_COUNT
+Accounts Total: $ACCOUNT_COUNT
 Dist. Lists:    $DL_COUNT
 DL Members:     $DL_MEMBER_COUNT
 Password Hash : $PASSWORD_BACKUP_COUNT
 Mailbox Success: $BACKUP_SUCCESS
 Mailbox Failed : $BACKUP_FAILED
-System Skipped : $SKIPPED_COUNT
 User Preferences: $USER_PREF_COUNT
 ========================================================
 
 BACKUP INCLUDES:
-✅ Global Configuration (zmprov gacf)
-✅ Server Configuration (zmprov gs)
-✅ Local Configuration (zmlocalconfig)
-✅ All Accounts List (zmprov -l gaa)
-✅ All Domains (zmprov gad)
-✅ All Distribution Lists (zmprov gadl)
-✅ DL Members per list (zmprov gdlm)
-✅ Password Hashes (user accounts only)
-✅ Mailboxes (user accounts only, TGZ via zmmailbox)
-✅ User Preferences (includes signatures & filters)
+✅ Global/Server/Local Configuration (Weekly Only)
+✅ All Domains & Distribution Lists (Weekly Only)
+✅ Password Hashes (Filtered by Mode)
+✅ Mailboxes (Filtered by Mode)
+✅ User Preferences (Filtered by Mode)
 
-EXCLUDED SYSTEM ACCOUNTS:
-❌ admin@* (administrative)
-❌ spam.* (spam quarantine)
-❌ ham.* (ham quarantine)
-❌ virus-quarantine.* (virus quarantine)
-❌ galsync.* (GAL sync)
-❌ postmaster@* (system)
-❌ abuse@* (system)
+DAILY BACKUP FILTER:
+🔹 Only accounts with status: $DAILY_ALLOWED_STATUSES
+🔹 Accounts with status 'closed' are skipped in daily mode.
+🔹 Run 'weekly' mode on Sunday to backup everything.
 
 ⚠️  SECURITY WARNING - PASSWORD FILES:
 🔒 Location: $BACKUP_ROOT/passwords/${BACKUP_DATE}/
 🔒 Permission: 700 (zimbra:zimbra only)
-🔒 DO NOT share these files!
-🔒 DO NOT commit to version control!
-
-ℹ️  NOTE: User preferences.txt includes:
-   - Signatures (zimbraPrefSignature)
-   - Filters/Forwarding (zimbraPrefMailForwardingAddress)
-   - Account status (zimbraAccountStatus)
-   - All other user settings
 
 ========================================================
-  RESTORE INSTRUCTIONS
-========================================================
-1. Stop Zimbra: su - zimbra -c "zmcontrol stop"
-2. Restore config: bash zimbra-restore.sh --config $BACKUP_DATE
-3. Restore passwords: bash zimbra-restore.sh --passwords $BACKUP_DATE
-4. Restore mailboxes: bash zimbra-restore.sh --mailboxes $BACKUP_DATE
-5. Restore distribution lists: See docs/zimbra-restore.md
-6. Start Zimbra: su - zimbra -c "zmcontrol start"
-7. Verify: bash zimbra-verify-backup.sh $BACKUP_DATE
+RESTORE INSTRUCTIONS:
+1. Restore Config (if weekly): bash zimbra-restore.sh --mode config $BACKUP_DATE
+2. Restore Passwords: bash zimbra-restore.sh --mode passwords $BACKUP_DATE
+3. Restore Mailboxes: bash zimbra-restore.sh --mode mailboxes $BACKUP_DATE
+4. Restore Preferences: bash zimbra-restore.sh --mode preferences $BACKUP_DATE
 ========================================================
 EOF
 
-pass "   Backup summary generated"
+pass "   Backup summary generated at: $BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FINAL SUMMARY
@@ -420,35 +393,24 @@ pass "   Backup summary generated"
 echo -e "\n${GREEN}========================================================${NC}"
 echo -e "${GREEN}  BACKUP SELESAI${NC}"
 echo -e "${GREEN}========================================================${NC}"
-echo -e "Backup Date   : $BACKUP_DATE"
-echo -e "Server        : $SERVER_NAME"
-echo -e "Backup Type   : $BACKUP_TYPE"
+echo -e "Date          : $BACKUP_DATE"
+echo -e "Mode          : $BACKUP_TYPE"
 echo -e "Backup Size   : $BACKUP_SIZE"
 echo -e "Total Size    : $TOTAL_BACKUP_SIZE"
-echo -e "Domains       : $DOMAIN_COUNT"
-echo -e "Accounts      : $ACCOUNT_COUNT"
-echo -e "Dist. Lists   : $DL_COUNT"
-echo -e "DL Members    : $DL_MEMBER_COUNT"
-echo -e "Password Hash : $PASSWORD_BACKUP_COUNT"
-echo -e "Mailbox Success: $BACKUP_SUCCESS"
-echo -e "Mailbox Failed : $BACKUP_FAILED"
-echo -e "System Skipped : $SKIPPED_COUNT"
-echo -e "User Preferences: $USER_PREF_COUNT"
+echo -e "Accounts      : $ACCOUNT_COUNT (Filtered)"
+echo -e "Mailbox Done  : $BACKUP_SUCCESS"
+echo -e "Mailbox Fail  : $BACKUP_FAILED"
+echo -e "Passwords     : $PASSWORD_BACKUP_COUNT"
 echo -e "Retention     : $RETENTION_DAYS days"
-echo -e "Backup Root   : $BACKUP_ROOT"
 echo -e "Log File      : $LOG_FILE"
-echo -e "${GREEN}========================================================${NC}"
-echo -e "${YELLOW}⚠️  SECURITY WARNING:${NC}"
-echo -e "Password hashes saved in: $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
-echo -e "Permission: 700 (zimbra:zimbra only)"
-echo -e "${YELLOW}Next Steps:${NC}"
-echo -e "1. Review log file: cat $LOG_FILE"
-echo -e "2. Verify DL backup: cat $BACKUP_ROOT/distribution-lists/distribution-lists-${BACKUP_DATE}.txt"
-echo -e "3. Verify password files: ls -la $BACKUP_ROOT/passwords/${BACKUP_DATE}/"
-echo -e "4. Verify backup: bash zimbra-verify-backup.sh $BACKUP_DATE"
-echo -e "5. Setup cron for automated backup"
 echo -e "${GREEN}========================================================${NC}\n"
 
-cp "$LOG_FILE" "$BACKUP_ROOT/logs/"
+if [ "$BACKUP_TYPE" = "daily" ]; then
+  echo -e "${YELLOW}ℹ️  NOTE:${NC} Daily backup contains User Data only (Active users)."
+  echo -e "    Config & DLs are skipped. Use Weekly backup for full system restore."
+fi
+
+# Copy log to backup root just in case
+cp "$LOG_FILE" "$BACKUP_ROOT/logs/" 2>/dev/null
 
 exit 0
