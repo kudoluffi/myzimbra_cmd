@@ -162,7 +162,7 @@ pass "Backup directories created"
 # 1. CONFIG BACKUP (ONLY FOR WEEKLY)
 # ─────────────────────────────────────────────────────────────────────────────
 if [ "$BACKUP_TYPE" = "weekly" ]; then
-  log "1. Backing up Zimbra configuration..."
+  log "[$(date '+%Y-%m-%d %H:%M:%S')] 1. Backing up Zimbra configuration..."
 
   log "   Exporting global config..."
   su - $ZIMBRA_USER -c "zmprov gacf > $BACKUP_ROOT/config/global-config-${BACKUP_DATE}.txt" 2>&1
@@ -180,14 +180,14 @@ if [ "$BACKUP_TYPE" = "weekly" ]; then
   su - $ZIMBRA_USER -c "zmcontrol -v > $BACKUP_ROOT/config/zimbra-version-${BACKUP_DATE}.txt" 2>&1
   pass "   Version info saved"
 else
-  log "1. Skipping Config Backup (Daily Mode - User Data Only)"
+  log "[$(date '+%Y-%m-%d %H:%M:%S')] 1. Skipping Config Backup (Daily Mode - User Data Only)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 2. DOMAINS & DISTRIBUTION LISTS (ONLY FOR WEEKLY)
 # ─────────────────────────────────────────────────────────────────────────────
 if [ "$BACKUP_TYPE" = "weekly" ]; then
-  log "2. Backing up Domains & Distribution Lists..."
+  log "[$(date '+%Y-%m-%d %H:%M:%S')] 2. Backing up Domains & Distribution Lists..."
 
   log "   Exporting domain list..."
   su - $ZIMBRA_USER -c "zmprov gad > $BACKUP_ROOT/distribution-lists/domains-${BACKUP_DATE}.txt" 2>&1
@@ -218,7 +218,7 @@ if [ "$BACKUP_TYPE" = "weekly" ]; then
     DL_MEMBER_COUNT=0
   fi
 else
-  log "2. Skipping Domains & DLs Backup (Daily Mode - User Data Only)"
+  log "[$(date '+%Y-%m-%d %H:%M:%S')] 2. Skipping Domains & DLs Backup (Daily Mode - User Data Only)"
   DOMAIN_COUNT=0
   DL_COUNT=0
   DL_MEMBER_COUNT=0
@@ -227,7 +227,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. GENERATE FILTERED ACCOUNT LIST
 # ─────────────────────────────────────────────────────────────────────────────
-log "3. Generating Account List (Filtered by Mode & Status)..."
+log "[$(date '+%Y-%m-%d %H:%M:%S')] 3. Generating Account List (Filtered by Mode & Status)..."
 ACCOUNT_COUNT=0
 if ! generate_filtered_account_list; then
   fail "   Critical Error: Cannot generate account list. Aborting."
@@ -237,7 +237,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. PASSWORD HASH BACKUP
 # ─────────────────────────────────────────────────────────────────────────────
-log "4. Backing up password hashes..."
+log "[$(date '+%Y-%m-%d %H:%M:%S')] 4. Backing up password hashes..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   mkdir -p "$BACKUP_ROOT/passwords/${BACKUP_DATE}"
@@ -269,7 +269,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # 5. MAILBOX BACKUP
 # ─────────────────────────────────────────────────────────────────────────────
-log "5. Backing up mailboxes ($BACKUP_TYPE)..."
+log "[$(date '+%Y-%m-%d %H:%M:%S')] 5. Backing up mailboxes ($BACKUP_TYPE)..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   BACKUP_SUCCESS=0
@@ -308,7 +308,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. USER PREFERENCES
 # ─────────────────────────────────────────────────────────────────────────────
-log "6. Backing up user preferences..."
+log "[$(date '+%Y-%m-%d %H:%M:%S')] 6. Backing up user preferences..."
 
 if [ "$ACCOUNT_COUNT" -gt 0 ]; then
   USER_PREF_COUNT=0
@@ -329,7 +329,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # 7. RETENTION POLICY
 # ─────────────────────────────────────────────────────────────────────────────
-log "7. Applying retention policy ($RETENTION_DAYS days)..."
+log "[$(date '+%Y-%m-%d %H:%M:%S')] 7. Applying retention policy ($RETENTION_DAYS days)..."
 
 OLD_BACKUPS=$(find "$BACKUP_ROOT/mailboxes" -type d -name "20*" -mtime +$RETENTION_DAYS 2>/dev/null)
 if [ -n "$OLD_BACKUPS" ]; then
@@ -366,7 +366,7 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # 9. BACKUP SUMMARY (RESTORED)
 # ─────────────────────────────────────────────────────────────────────────────
-log "8. Generating BACKUP-SUMMARY.txt..."
+log "[$(date '+%Y-%m-%d %H:%M:%S')] 8. Generating BACKUP-SUMMARY.txt..."
 
 BACKUP_SIZE=$(du -sh "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}" 2>/dev/null | cut -f1)
 TOTAL_BACKUP_SIZE=$(du -sh "$BACKUP_ROOT" 2>/dev/null | cut -f1)
