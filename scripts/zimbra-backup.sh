@@ -1,6 +1,6 @@
 #!/bin/bash
-# zimbra-backup.sh v2.3
-# FIXED: Restored BACKUP-SUMMARY.txt + Fixed Empty Log Files
+# zimbra-backup.sh v2.4
+# FIXED: Status extraction logic + Added Backup Duration Timing
 # Usage: sudo bash zimbra-backup.sh [weekly|daily]
 
 set -u
@@ -13,7 +13,7 @@ fail() { echo -e "${RED}[FAIL]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURATION
+# TIMING & LOGGING
 # ─────────────────────────────────────────────────────────────────────────────
 BACKUP_ROOT="/backup/zimbra"
 BACKUP_DATE=$(date +%Y%m%d)
@@ -23,10 +23,19 @@ ZIMBRA_USER="zimbra"
 LOG_FILE="/var/log/zimbra-backup-${BACKUP_DATE}.log"
 SERVER_NAME=$(hostname -f)
 
-# Status yang diizinkan untuk DAILY backup
+# Record Start Time
+START_TIME=$(date +%s)
+START_TIME_FMT=$(date '+%Y-%m-%d %H:%M:%S')
+
+# Redirect ALL output to log file AND terminal
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
 DAILY_ALLOWED_STATUSES="active locked lockout"
 
-# System accounts yang TIDAK PERNAH di-backup
+# System accounts that are NEVER backed up
 EXCLUDE_PATTERNS=(
   "^admin@"
   "^spam\."
@@ -36,11 +45,6 @@ EXCLUDE_PATTERNS=(
   "^postmaster@"
   "^abuse@"
 )
-
-# ─────────────────────────────────────────────────────────────────────────────
-# LOGGING FIX: Redirect ALL output to log file AND terminal
-# ─────────────────────────────────────────────────────────────────────────────
-exec > >(tee -a "$LOG_FILE") 2>&1
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MODE SELECTION
@@ -76,6 +80,7 @@ generate_filtered_account_list() {
   local raw_list
   
   # Get all accounts from LDAP
+  log "   Fetching all accounts from LDAP..."
   raw_list=$(su - $ZIMBRA_USER -c "zmprov -l gaa" 2>/dev/null)
   
   if [ -z "$raw_list" ]; then
@@ -84,31 +89,38 @@ generate_filtered_account_list() {
   fi
 
   > "$output_file"
+  local processed=0
 
   while IFS= read -r account; do
     [ -z "$account" ] && continue
     
+    # 1. Skip system accounts (admin, spam, etc.)
     if should_exclude_system "$account"; then
       continue
     fi
 
+    # 2. If DAILY mode, check status
     if [ "$BACKUP_TYPE" = "daily" ]; then
+      # FIXED: Use grep to filter specifically for the attribute line
       local status
-      status=$(su - $ZIMBRA_USER -c "zmprov ga '$account' zimbraAccountStatus" 2>/dev/null | awk '{print $2}')
+      status=$(su - $ZIMBRA_USER -c "zmprov ga '$account' zimbraAccountStatus" 2>/dev/null | grep "zimbraAccountStatus:" | awk '{print $2}')
       
+      # If status is NOT in allowed list, skip
       if ! echo "$DAILY_ALLOWED_STATUSES" | grep -qw "$status"; then
         log "   ⏭️  Skip $account (Status: $status)"
         continue
       fi
     fi
 
+    # Add to list
     echo "$account" >> "$output_file"
+    processed=$((processed + 1))
     
   done <<< "$raw_list"
 
   if [ -s "$output_file" ]; then
     ACCOUNT_COUNT=$(wc -l < "$output_file")
-    pass "   Account list generated: $ACCOUNT_COUNT accounts (Mode: $BACKUP_TYPE)"
+    pass "   Account list generated: $ACCOUNT_COUNT accounts (Processed: $processed, Mode: $BACKUP_TYPE)"
     return 0
   else
     warn "   No accounts found to backup!"
@@ -126,9 +138,10 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 echo -e "\n${GREEN}========================================================${NC}"
-echo -e "${GREEN}  Zimbra Backup Script (v2.3 - Fixed Logs & Summary)${NC}"
+echo -e "${GREEN}  Zimbra Backup Script (v2.4 - Fixed Logs & Timing)${NC}"
 echo -e "${GREEN}========================================================${NC}\n"
 
+log "Backup Start: $START_TIME_FMT"
 log "Backup Date: $BACKUP_DATE"
 log "Server: $SERVER_NAME"
 log "Backup Type: $BACKUP_TYPE"
@@ -331,7 +344,27 @@ if [ -n "$OLD_PASS_BACKUPS" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. BACKUP SUMMARY (RESTORED)
+# 8. CALCULATE DURATION
+# ─────────────────────────────────────────────────────────────────────────────
+END_TIME=$(date +%s)
+DURATION=$((END_TIME - START_TIME))
+
+# Format duration
+MINS=$((DURATION / 60))
+SECS=$((DURATION % 60))
+HOURS=$((MINS / 60))
+MINS=$((MINS % 60))
+
+if [ $HOURS -gt 0 ]; then
+  DURATION_FMT="${HOURS}h ${MINS}m ${SECS}s"
+elif [ $MINS -gt 0 ]; then
+  DURATION_FMT="${MINS}m ${SECS}s"
+else
+  DURATION_FMT="${SECS}s"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 9. BACKUP SUMMARY (RESTORED)
 # ─────────────────────────────────────────────────────────────────────────────
 log "8. Generating BACKUP-SUMMARY.txt..."
 
@@ -341,11 +374,16 @@ TOTAL_BACKUP_SIZE=$(du -sh "$BACKUP_ROOT" 2>/dev/null | cut -f1)
 # Ensure directory exists
 mkdir -p "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}"
 
+END_TIME_FMT=$(date '+%Y-%m-%d %H:%M:%S')
+
 cat > "$BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACKUP-SUMMARY.txt" <<EOF
 ========================================================
-  ZIMBRA BACKUP SUMMARY (v2.3)
+  ZIMBRA BACKUP SUMMARY (v2.4)
 ========================================================
 Backup Date:    $BACKUP_DATE
+Start Time:     $START_TIME_FMT
+End Time:       $END_TIME_FMT
+Duration:       $DURATION_FMT
 Server:         $SERVER_NAME
 Backup Type:    $BACKUP_TYPE (Weekly=All, Daily=Active Only)
 Retention:      $RETENTION_DAYS days
@@ -393,6 +431,7 @@ pass "   Backup summary generated at: $BACKUP_ROOT/mailboxes/${BACKUP_DATE}/BACK
 echo -e "\n${GREEN}========================================================${NC}"
 echo -e "${GREEN}  BACKUP SELESAI${NC}"
 echo -e "${GREEN}========================================================${NC}"
+echo -e "Duration      : ${YELLOW}$DURATION_FMT${NC}"
 echo -e "Date          : $BACKUP_DATE"
 echo -e "Mode          : $BACKUP_TYPE"
 echo -e "Backup Size   : $BACKUP_SIZE"
