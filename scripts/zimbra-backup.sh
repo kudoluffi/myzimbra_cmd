@@ -328,20 +328,43 @@ if [ "$ACCOUNT_COUNT" -gt 0 ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 7. RETENTION POLICY
+# 7. RETENTION POLICY (FIXED: Count-based deletion)
 # ─────────────────────────────────────────────────────────────────────────────
-log "[$(date '+%Y-%m-%d %H:%M:%S')] 7. Applying retention policy ($RETENTION_DAYS days)..."
+log "7. Applying retention policy (Keep last $RETENTION_DAYS backups)..."
 
-OLD_BACKUPS=$(find "$BACKUP_ROOT/mailboxes" -type d -name "20*" -mtime +$RETENTION_DAYS 2>/dev/null)
-if [ -n "$OLD_BACKUPS" ]; then
-  while IFS= read -r old_dir; do rm -rf "$old_dir"; done <<< "$OLD_BACKUPS"
-  pass "   Deleted old mailbox backups"
-fi
+# List semua folder backup, urutkan dari yang terlama (oldest first)
+# Format nama YYYYMMDD memudahkan pengurutan secara alfabet = kronologis
+ALL_BACKUPS=$(ls -1d "$BACKUP_ROOT/mailboxes"/20* 2>/dev/null | sort)
+BACKUP_COUNT=$(echo "$ALL_BACKUPS" | wc -l)
 
-OLD_PASS_BACKUPS=$(find "$BACKUP_ROOT/passwords" -type d -name "20*" -mtime +$RETENTION_DAYS 2>/dev/null)
-if [ -n "$OLD_PASS_BACKUPS" ]; then
-  while IFS= read -r old_dir; do rm -rf "$old_dir"; done <<< "$OLD_PASS_BACKUPS"
-  pass "   Deleted old password backups"
+if [ "$BACKUP_COUNT" -gt "$RETENTION_DAYS" ]; then
+  # Hitung berapa yang harus dihapus
+  TO_DELETE=$((BACKUP_COUNT - RETENTION_DAYS))
+  
+  # Ambil folder terlama sebanyak jumlah yang harus dihapus
+  OLD_BACKUPS=$(echo "$ALL_BACKUPS" | head -n "$TO_DELETE")
+  
+  log "   Found $BACKUP_COUNT backups. Deleting $TO_DELETE oldest..."
+  
+  while IFS= read -r old_dir; do
+    if [ -n "$old_dir" ]; then
+      rm -rf "$old_dir"
+      log "   Deleted: $old_dir"
+    fi
+  done <<< "$OLD_BACKUPS"
+  
+  # Do the same for password backups
+  PASS_BACKUP_COUNT=$(ls -1d "$BACKUP_ROOT/passwords"/20* 2>/dev/null | wc -l)
+  if [ "$PASS_BACKUP_COUNT" -gt "$RETENTION_DAYS" ]; then
+    PASS_TO_DELETE=$((PASS_BACKUP_COUNT - RETENTION_DAYS))
+    OLD_PASS=$(ls -1d "$BACKUP_ROOT/passwords"/20* 2>/dev/null | sort | head -n "$PASS_TO_DELETE")
+    while IFS= read -r old_dir; do
+      [ -n "$old_dir" ] && rm -rf "$old_dir"
+    done <<< "$OLD_PASS"
+    log "   Deleted old password backups"
+  fi
+else
+  log "   Only $BACKUP_COUNT backups found (Limit: $RETENTION_DAYS). Nothing to delete."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
